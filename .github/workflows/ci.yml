@@ -1,0 +1,27 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The datapath test opens a real TUN device when it can. Loading the
+      # module and granting the capability lets that path run instead of
+      # reporting itself as skipped.
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq libsodium-dev
+      - run: sudo modprobe tun && ls -l /dev/net/tun
+      - run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DNORR_ENABLE_SANITIZERS=ON
+      - run: cmake --build build --parallel
+      - run: ctest --test-dir build --output-on-failure
+      # Re-run the datapath test with CAP_NET_ADMIN so the TUN portion is
+      # actually exercised rather than skipped.
+      - run: sudo ./build/norr_datapath_tests
+      - run: cmake -S . -B fuzz-build -G Ninja -DNORR_BUILD_TESTS=OFF -DNORR_BUILD_FUZZERS=ON
+      - run: cmake --build fuzz-build --target norr_packet_fuzz norr_handshake_frame_fuzz norr_config_fuzz norr_ip_packet_fuzz norr_noise_fuzz
+      - run: ./fuzz-build/norr_packet_fuzz -runs=20000 -max_len=2048
+      - run: ./fuzz-build/norr_handshake_frame_fuzz -runs=20000 -max_len=2048
+      - run: ./fuzz-build/norr_config_fuzz -runs=20000 -max_len=4096
+      - run: ./fuzz-build/norr_ip_packet_fuzz -runs=20000 -max_len=2048
+      - run: ./fuzz-build/norr_noise_fuzz -runs=5000 -max_len=2048
