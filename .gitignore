@@ -12,3 +12,5 @@ core.*
 *.pub
 
 .DS_Store
+
+/dist/
