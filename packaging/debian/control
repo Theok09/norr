@@ -1,0 +1,21 @@
+Source: norr
+Section: net
+Priority: optional
+Maintainer: Norr contributors <noreply@example.invalid>
+Build-Depends: debhelper-compat (= 13), cmake (>= 3.25), ninja-build, pkg-config,
+               libsodium-dev, libgnutls28-dev, libngtcp2-dev, libngtcp2-crypto-gnutls-dev
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+
+Package: norr
+Architecture: linux-any
+Depends: ${shlibs:Depends}, ${misc:Depends}, adduser
+Description: Encrypted L3 tunnel
+ Norr carries IP packets between peers over an authenticated, encrypted
+ datapath. Peers are identified by X25519 static keys and authenticated with
+ the Noise IKpsk2 pattern; traffic is sealed with ChaCha20-Poly1305 and
+ protected by an 8192-entry replay window.
+ .
+ The UDP carrier is the only transport currently selectable. The QUIC and TCP
+ carriers are implemented but not yet usable as tunnel transports; see
+ /usr/share/doc/norr/known-limitations.md for what is and is not finished.

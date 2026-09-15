@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  purge)
+    # The private key lives under /etc/norr. Removing it on purge is correct,
+    # but it is unrecoverable, so it happens only on purge and never on remove.
+    rm -rf /etc/norr /var/lib/norr
+    if getent passwd norr >/dev/null; then
+      deluser --system norr || true
+    fi
+    ;;
+esac
+
+#DEBHELPER#
+exit 0

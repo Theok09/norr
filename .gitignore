@@ -1,0 +1,14 @@
+/build/
+/build-*/
+/fuzz-build/
+/compile_commands.json
+
+# Core dumps carry process memory, which for a tunnel means session keys.
+core
+core.*
+*.core
+
+*.key
+*.pub
+
+.DS_Store
