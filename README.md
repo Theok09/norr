@@ -41,7 +41,7 @@ There is one target per untrusted-input parser: `parse_packet`,
 Linux/Clang builds use libFuzzer. macOS/Xcode does not ship the libFuzzer
 runtime, so it builds deterministic smoke drivers over the same entry points
 instead. A macOS run is a rot check, not fuzz coverage; real campaigns run in
-CI on Linux under ASan and UBSan. See `testing/fuzzing.md`.
+CI on Linux under ASan and UBSan. Build them with `-DNORR_BUILD_FUZZERS=ON`.
 
 Norr is a Linux-first, high-performance encrypted Layer-3 tunnel designed around a small common core and three transport families:
 
@@ -81,4 +81,4 @@ This repository is an implementation-oriented specification. Every protocol feat
 - tests
 - benchmark or operational evidence where performance-sensitive
 
-The exact byte-level wire format is defined in `protocol/wire-format.md` and is frozen before interoperability work begins.
+The byte-level wire format is defined by `include/norr/packet.hpp` and `include/norr/handshake_frame.hpp`, and is frozen before interoperability work begins.
