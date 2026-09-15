@@ -1,84 +1,179 @@
-# Norr — Complete Project Specification
+# Norr
 
-## Build (Phase 0)
+An encrypted Layer-3 tunnel for Linux. Peers are identified by X25519 static
+keys and authenticated with the Noise IKpsk2 pattern; traffic is sealed with
+ChaCha20-Poly1305 behind an 8192-entry replay window.
 
-```sh
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
-ctest --test-dir build --output-on-failure
-./build/norr version
-./build/norr check deployment/config-example.toml
-```
+Norr carries IP packets, not ports. Each peer is assigned inner prefixes, and
+a packet is only accepted from a peer authorised to send that source address.
 
-For local memory-safety checks, add `-DNORR_ENABLE_SANITIZERS=ON` during configuration.
+## Install
 
-## Platform
+One command, on Debian or Ubuntu. It installs dependencies, builds, runs the
+test suite, installs, and creates the service account:
 
-Linux is the target. The datapath (`src/tun.cpp`, `src/udp_transport.cpp`) uses
-`/dev/net/tun`, `recvmmsg` and `sendmmsg`.
+    sudo sh scripts/install.sh
 
-The project still builds and tests on macOS so it can be developed there, but
-every datapath entry point reports `unsupported_platform` on a non-Linux host
-rather than pretending to work. To exercise the real datapath from a macOS
-machine, build inside a Linux container with TUN access:
+It refuses to install if the tests fail. What it does by hand:
 
-```sh
-docker run --rm --cap-add=NET_ADMIN --device=/dev/net/tun \
-  -v "$PWD":/src -w /src silkeh/clang:19 bash -c '
-    apt-get update -qq && apt-get install -y -qq cmake ninja-build
-    cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Debug
-    cmake --build build-linux
-    ctest --test-dir build-linux --output-on-failure'
-```
+    sudo apt-get install -y cmake ninja-build pkg-config \
+        libsodium-dev libgnutls28-dev libngtcp2-dev libngtcp2-crypto-gnutls-dev
 
-Without `--cap-add=NET_ADMIN` the TUN portion of the datapath test reports
-itself as skipped instead of failing.
+    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+    cmake --build build
+    sudo cmake --install build
 
-To build the parser fuzz targets, configure with `-DNORR_BUILD_FUZZERS=ON`.
-There is one target per untrusted-input parser: `parse_packet`,
-`parse_handshake_frame` and `parse_config`.
+That installs the binary at `/usr/bin/norr`, a systemd unit at
+`/usr/lib/systemd/system/norr.service`, and an example configuration under
+`/usr/share/doc/norr/`.
 
-Linux/Clang builds use libFuzzer. macOS/Xcode does not ship the libFuzzer
-runtime, so it builds deterministic smoke drivers over the same entry points
-instead. A macOS run is a rot check, not fuzz coverage; real campaigns run in
-CI on Linux under ASan and UBSan. Build them with `-DNORR_BUILD_FUZZERS=ON`.
+Create the service account and configuration directory:
 
-Norr is a Linux-first, high-performance encrypted Layer-3 tunnel designed around a small common core and three transport families:
+    sudo useradd --system --no-create-home --shell /usr/sbin/nologin norr
+    sudo mkdir -p /etc/norr
+    sudo chown root:norr /etc/norr
+    sudo chmod 0750 /etc/norr
 
-1. UDP — primary performance path
-2. QUIC v1 — adaptive secondary path
-3. TLS 1.3 over TCP — compatibility fallback
+## Configure
 
-## Non-goals
+Generate a key. The private half goes to stdout and the public half to stderr,
+so a redirect captures the secret without the public key landing in the file:
 
-Norr does not implement:
-- custom cryptographic primitives for production
-- IP spoofing
-- traffic-classification evasion mechanisms
-- TCP-over-TCP
-- mandatory application multiplexing
-- WebSocket transport in core
-- KCP in core
+    sudo sh -c 'norr keygen > /etc/norr/private.key' 
+    sudo chown root:norr /etc/norr/private.key
+    sudo chmod 0640 /etc/norr/private.key
 
-## Language and toolchain
+Norr refuses to start if the key file is readable by anyone else.
 
-- C++23
-- Clang
-- CMake + Ninja
-- Linux-first
-- Boost.Asio for control-plane orchestration where useful
-- native Linux sockets / TUN / GSO/GRO for the hot path
-- optional io_uring backend after measurement
-- optional DPDK backend only as a later acceleration path
+Copy the example and edit it:
 
-## Specification status
+    sudo cp /usr/share/doc/norr/norr.toml.example /etc/norr/norr.toml
 
-This repository is an implementation-oriented specification. Every protocol feature must have:
-- wire format
-- state machine
-- error behavior
-- invariants
-- tests
-- benchmark or operational evidence where performance-sensitive
+A minimal two-peer configuration. On the server:
 
-The byte-level wire format is defined by `include/norr/packet.hpp` and `include/norr/handshake_frame.hpp`, and is frozen before interoperability work begins.
+    [node]
+    listen_port = 51820
+    tun = "norr0"
+
+    [identity]
+    key_file = "/etc/norr/private.key"
+
+    [network]
+    address = "10.99.0.1/32"
+
+    [[peer]]
+    name = "client"
+    public_key = "<client public key>"
+    preshared_key = "<shared 64-hex secret>"
+    allowed_ips = "10.99.0.2/32"
+
+On the client, add the server's endpoint so it dials:
+
+    [network]
+    address = "10.99.0.2/32"
+
+    [[peer]]
+    name = "server"
+    public_key = "<server public key>"
+    preshared_key = "<the same shared secret>"
+    endpoint = "203.0.113.10:51820"
+    allowed_ips = "10.99.0.1/32"
+
+Validate before starting. This catches every configuration error the runtime
+would otherwise hit at startup:
+
+    norr check /etc/norr/norr.toml
+
+## Run
+
+    sudo systemctl enable --now norr
+    systemctl status norr
+
+The unit runs as an unprivileged user with only `CAP_NET_ADMIN`, which Norr
+needs to create the TUN device and drops once it exists. Core dumps are
+disabled, because a core file from a tunnel contains session keys.
+
+Norr does not configure the interface address or routes. Doing so needs
+privileges the process gives up at startup, so it is left to the system. On
+the server:
+
+    sudo ip addr add 10.99.0.1/32 dev norr0
+    sudo ip link set norr0 up
+    sudo ip route add 10.99.0.2/32 dev norr0
+
+And correspondingly on the client. Make these persistent through your
+distribution's network configuration rather than by hand.
+
+Verify traffic is flowing:
+
+    ping -I 10.99.0.2 10.99.0.1
+
+## Observe
+
+Set an address to expose Prometheus metrics:
+
+    [observability]
+    metrics = true
+    listen = "127.0.0.1:9101"
+
+The endpoint is unauthenticated and reports traffic counters, so bind it to
+loopback or a management address. It exports packets encrypted and decrypted,
+drops labelled by reason, handshake and cookie counters, and session counts.
+
+## What works, and what does not
+
+Verified end to end on Linux: the UDP carrier, multi-peer hub-and-spoke
+routing, rekey without packet loss, keepalive through NAT, QoS pacing, the
+metrics endpoint, and TLS 1.3 over the TCP carrier.
+
+Not finished, and refused at startup rather than silently ignored: QUIC and
+TCP carrier selection, and FEC. Setting `transport.mode` to `quic` or
+`tcp-tls`, or `fec.mode` to anything but `off`, fails with a message saying
+why.
+
+`docs/known-limitations.md` records each gap, what was observed, and what
+closing it needs.
+
+## Design
+
+Linux-first. The datapath uses `/dev/net/tun` with `recvmmsg` and `sendmmsg`.
+The project builds on macOS for development, but every datapath entry point
+reports `unsupported_platform` there rather than pretending to work.
+
+The byte-level wire format is defined by `include/norr/packet.hpp` and
+`include/norr/handshake_frame.hpp`.
+
+Norr deliberately does not implement custom cryptographic primitives, IP
+spoofing, traffic-classification evasion, or TCP-over-TCP.
+
+## Development
+
+    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+    cmake --build build
+    ctest --test-dir build --output-on-failure
+
+Add `-DNORR_ENABLE_SANITIZERS=ON` for AddressSanitizer and UndefinedBehaviorSanitizer.
+
+The datapath tests need a real TUN device. From a macOS host, run them in a
+container with the capability granted, or they report themselves as skipped:
+
+    docker run --rm --cap-add=NET_ADMIN --device=/dev/net/tun \
+      -v "$PWD":/src -w /src silkeh/clang:19 bash -c '
+        apt-get update -qq && apt-get install -y -qq cmake ninja-build pkg-config \
+            libsodium-dev libgnutls28-dev libngtcp2-dev libngtcp2-crypto-gnutls-dev
+        cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Debug
+        cmake --build build-linux
+        ctest --test-dir build-linux --output-on-failure'
+
+Two integration scripts run real tunnels between network namespaces:
+`scripts/e2e_tunnel.sh` for two nodes, `scripts/e2e_multipeer.sh` for a hub
+with two spokes. Both need root.
+
+Fuzz targets are built with `-DNORR_BUILD_FUZZERS=ON`, one per untrusted-input
+parser. Linux and Clang use libFuzzer; macOS lacks the runtime and builds
+deterministic smoke drivers over the same entry points instead, which is a rot
+check rather than fuzz coverage.
+
+## Licence
+
+MIT. See `LICENSE`, which also records the terms of the libraries Norr links.
