@@ -1,0 +1,61 @@
+# Norr configuration.
+#
+# Validate before starting:  norr check /etc/norr/norr.toml
+# Start:                     norr run /etc/norr/norr.toml
+
+[node]
+role = "server"
+listen_port = 51820
+# Interface name. Address and routes are configured outside Norr, because
+# doing so needs privileges this process drops at startup.
+tun = "norr0"
+
+[identity]
+# Produced by `norr keygen > /etc/norr/private.key`.
+# Must not be readable by group or other; Norr refuses to start otherwise.
+key_file = "/etc/norr/private.key"
+
+[network]
+ipv4 = true
+ipv6 = true
+# "auto" leaves the interface default. An explicit value is applied to the TUN
+# device at startup; 1280 is the floor, being IPv6's minimum link MTU. PMTU
+# discovery is not performed, so an explicit value is used exactly as given.
+mtu = "auto"
+
+# Only "auto" and "udp" are carried today. The QUIC and TCP carriers are
+# implemented and tested on their own, but neither has a listener or carrier
+# selection, so asking for one is refused at startup rather than silently
+# ignored.
+[transport]
+mode = "auto"
+
+# Queueing and pacing. Enabling this requires a rate: without one the pacer has
+# nothing to pace against, so the pair is validated together at `norr check`
+# rather than starting and doing nothing. burst_bytes is derived from the rate
+# when omitted.
+[qos]
+enabled = false
+# rate_bytes = 12500000
+# burst_bytes = 65536
+
+# The encoder and decoder exist and are tested, but there is no wire framing
+# for them yet, so any mode other than "off" is refused at startup.
+[fec]
+mode = "off"
+
+# A Prometheus endpoint over plain HTTP. Enabling it requires a listen address,
+# validated together at `norr check`. Bind it to a loopback or management
+# address: the endpoint is unauthenticated and exposes traffic counters.
+[observability]
+metrics = false
+# listen = "127.0.0.1:9101"
+
+# One block per peer. A peer is identified by its static public key; the
+# endpoint is only needed on the side that dials.
+[[peer]]
+name = "edge-1"
+public_key = "0000000000000000000000000000000000000000000000000000000000000000"
+preshared_key = "0000000000000000000000000000000000000000000000000000000000000000"
+endpoint = "198.51.100.10:51820"
+allowed_ips = "10.80.0.2/32, fd00:80::2/128"

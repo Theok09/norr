@@ -1,0 +1,25 @@
+# Example configuration (illustrative)
+
+[node]
+role = "server"
+listen_port = 51880
+
+[identity]
+key_file = "/etc/norr/node.key"
+
+[network]
+ipv4 = true
+ipv6 = true
+mtu = "auto"
+
+[transport]
+mode = "auto"
+
+[qos]
+enabled = true
+
+[fec]
+mode = "adaptive"
+
+[observability]
+metrics = true

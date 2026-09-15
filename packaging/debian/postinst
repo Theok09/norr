@@ -1,0 +1,27 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  configure)
+    # The unit runs as an unprivileged user that owns nothing but its own
+    # state directory. CAP_NET_ADMIN is granted ambiently for the TUN device
+    # and dropped once it exists.
+    if ! getent passwd norr >/dev/null; then
+      adduser --system --group --no-create-home \
+              --home /var/lib/norr --shell /usr/sbin/nologin norr
+    fi
+
+    mkdir -p /etc/norr
+    chown root:norr /etc/norr
+    chmod 0750 /etc/norr
+
+    if [ ! -e /etc/norr/norr.toml ]; then
+      cp /usr/share/doc/norr/norr.toml.example /etc/norr/norr.toml
+      chown root:norr /etc/norr/norr.toml
+      chmod 0640 /etc/norr/norr.toml
+    fi
+    ;;
+esac
+
+#DEBHELPER#
+exit 0

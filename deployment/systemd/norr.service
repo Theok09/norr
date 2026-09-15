@@ -1,0 +1,66 @@
+[Unit]
+Description=Norr encrypted L3 tunnel
+Documentation=file:///usr/share/doc/norr/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/norr run /etc/norr/norr.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+
+# Creating the TUN device needs CAP_NET_ADMIN, and nothing else does. The
+# process drops to an unprivileged user once the device exists; see
+# `src/privilege.cpp`.
+User=norr
+Group=norr
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+
+# A core file from a tunnel contains session keys.
+LimitCORE=0
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateMounts=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# The key lives here and is read at startup; nothing else needs writing.
+ReadWritePaths=/var/lib/norr
+StateDirectory=norr
+StateDirectoryMode=0700
+ConfigurationDirectory=norr
+ConfigurationDirectoryMode=0750
+
+# /dev/net/tun is the one device node required. DevicePolicy=closed denies the
+# rest rather than listing what to block.
+DevicePolicy=closed
+DeviceAllow=/dev/net/tun rw
+
+# Both address families, and nothing else: a tunnel has no use for AF_PACKET
+# or netlink beyond what CAP_NET_ADMIN already covers.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
+
+LimitNOFILE=65536
+TasksMax=512
+
+[Install]
+WantedBy=multi-user.target
