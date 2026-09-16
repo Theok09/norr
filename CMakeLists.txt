@@ -340,6 +340,13 @@ if(NORR_BUILD_TESTS)
         set_tests_properties(norr_e2e_multipeer PROPERTIES
             SKIP_RETURN_CODE 77
             TIMEOUT 180)
+
+        add_test(NAME norr_e2e_fec
+                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norr>
+                         bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_fec.sh)
+        set_tests_properties(norr_e2e_fec PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 180)
     endif()
 endif()
 

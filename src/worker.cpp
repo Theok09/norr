@@ -86,7 +86,45 @@ DropReason Worker::forward_from_tun(std::span<const std::byte> frame) {
     return reason;
   }
 
-  const auto wire = std::span{encrypt_buffer_}.first(*sealed);
+  auto wire = std::span<const std::byte>{encrypt_buffer_}.first(*sealed);
+
+  // With FEC on, every packet carries a header naming its position in a block,
+  // so a receiver can tell which symbol is missing. The sealed packet is the
+  // symbol: FEC protects the ciphertext, not the plaintext, because a
+  // reconstructed symbol must still authenticate.
+  if (encoder_.mode() != FecMode::off) {
+    const FecSymbolHeader header{.block_id = encoder_.current_block(),
+                                 .index = static_cast<std::uint8_t>(encoder_.pending()),
+                                 .block_size =
+                                     static_cast<std::uint8_t>(block_size_for(encoder_.mode())),
+                                 .parity = false,
+                                 .original_length = static_cast<std::uint16_t>(*sealed)};
+    if (serialize_fec_header(header, fec_buffer_) == kFecHeaderSize) {
+      std::copy(wire.begin(), wire.end(),
+                fec_buffer_.begin() + static_cast<std::ptrdiff_t>(kFecHeaderSize));
+      const auto framed = std::span<const std::byte>{fec_buffer_}.first(kFecHeaderSize + *sealed);
+
+      // The encoder accumulates the symbol and hands back parity when the
+      // block is full. Both go out as fec frames; the parity carries its own
+      // header already.
+      last_fec_symbol_ = std::chrono::steady_clock::now();
+      fec_destination_ = *session->endpoint();
+      const auto parity = encoder_.add(wire);
+      if (parity) {
+        const std::array<OutboundDatagram, 2> both{
+            OutboundDatagram{.destination = *session->endpoint(), .payload = framed},
+            OutboundDatagram{.destination = *session->endpoint(), .payload = *parity}};
+        const auto sent_both = transport_->send_batch(both);
+        if (!sent_both || *sent_both == 0) {
+          stats_.record_drop(DropReason::send_failed);
+          return DropReason::send_failed;
+        }
+        ++stats_.tun_to_udp;
+        return DropReason::none;
+      }
+      wire = framed;
+    }
+  }
 
   if (queueing_enabled_) {
     const auto traffic_class = classify(*parsed, frame);
@@ -113,6 +151,13 @@ DropReason Worker::forward_from_tun(std::span<const std::byte> frame) {
 
   ++stats_.tun_to_udp;
   return DropReason::none;
+}
+
+void Worker::enable_fec(FecMode mode) {
+  encoder_.set_mode(mode);
+  fec_buffer_.assign(kFrameBufferSize + kPacketHeaderSize + kAeadTagSize +
+                         kPaddingAlignment + kFecHeaderSize,
+                     std::byte{0});
 }
 
 void Worker::enable_queueing(double bytes_per_second, std::size_t burst_bytes, Instant now) {
@@ -146,8 +191,55 @@ std::size_t Worker::drain_queue(Instant now) {
   return sent;
 }
 
+void Worker::flush_fec(Instant now) {
+  static_cast<void>(decoder_.expire(now));
+
+  if (encoder_.mode() == FecMode::off || encoder_.pending() == 0) return;
+  if (now - last_fec_symbol_ < kFecRecoveryDeadline) return;
+
+  const auto parity = encoder_.flush();
+  if (!parity) return;
+
+  const std::array<OutboundDatagram, 1> wire{
+      OutboundDatagram{.destination = fec_destination_, .payload = *parity}};
+  static_cast<void>(transport_->send_batch(wire));
+}
+
 DropReason Worker::forward_from_transport(const Endpoint& source,
                                           std::span<const std::byte> datagram) {
+  // A tagged datagram is a FEC symbol: a header, then either a sealed packet or
+  // parity. A parity symbol carries no packet of its own, and a lost one is
+  // reconstructed here before anything downstream sees it. Everything else -
+  // handshakes, and data from a peer that is not framing - passes straight
+  // through, which is what lets one side turn FEC on without the other.
+  if (looks_like_fec_symbol(datagram)) {
+    const auto header = parse_fec_header(datagram);
+    if (!header) {
+      stats_.record_drop(DropReason::malformed_outer_packet);
+      return DropReason::malformed_outer_packet;
+    }
+
+    const auto body = datagram.subspan(kFecHeaderSize);
+    const auto recovered = decoder_.receive(*header, body, std::chrono::steady_clock::now());
+
+    if (header->parity) {
+      // Parity carries no packet. If it completed a block, the reconstructed
+      // symbol is a sealed packet and is processed as one.
+      if (!recovered) return DropReason::none;
+      return forward_sealed(source, *recovered);
+    }
+
+    // A data symbol is forwarded on its own; a recovery it happens to complete
+    // is forwarded too, because both are packets the peer sent.
+    const auto reason = forward_sealed(source, body);
+    if (recovered) static_cast<void>(forward_sealed(source, *recovered));
+    return reason;
+  }
+
+  return forward_sealed(source, datagram);
+}
+
+DropReason Worker::forward_sealed(const Endpoint& source, std::span<const std::byte> datagram) {
   const auto view = parse_packet(datagram);
   if (!view) {
     stats_.record_drop(DropReason::malformed_outer_packet);

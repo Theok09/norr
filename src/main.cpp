@@ -129,6 +129,17 @@ int run(const std::string& path) {
               static_cast<unsigned long long>(control.handshakes_completed),
               static_cast<unsigned long long>(control.handshakes_failed));
 
+  if (runtime.fec_mode() != norr::FecMode::off) {
+    const auto& encode = runtime.fec_encode_stats();
+    const auto& decode = runtime.fec_decode_stats();
+    std::printf("fec %s  parity sent %llu  symbols %llu  recovered %llu  lost %llu\n",
+                std::string{norr::fec_mode_name(runtime.fec_mode())}.c_str(),
+                static_cast<unsigned long long>(encode.parity_sent),
+                static_cast<unsigned long long>(decode.symbols_received),
+                static_cast<unsigned long long>(decode.recovered),
+                static_cast<unsigned long long>(decode.unrecoverable));
+  }
+
   for (std::size_t index = 0; index < stats.drop_reasons.size(); ++index) {
     if (stats.drop_reasons[index] == 0) continue;
     std::printf("drop %s %llu\n",

@@ -43,29 +43,29 @@ bool loss_warrants_path_review(double loss_fraction) noexcept {
 
 std::size_t serialize_fec_header(const FecSymbolHeader& header, std::span<std::byte> out) noexcept {
   if (out.size() < kFecHeaderSize) return 0;
-  write_u32(out, 0, header.block_id);
-  out[4] = static_cast<std::byte>(header.index);
-  out[5] = static_cast<std::byte>(header.block_size);
-  out[6] = static_cast<std::byte>(header.parity ? 1 : 0);
-  out[7] = static_cast<std::byte>((header.original_length >> 8U) & 0xFFU);
-  out[8] = static_cast<std::byte>(header.original_length & 0xFFU);
+  out[0] = kFecTag;
+  write_u32(out, 1, header.block_id);
+  out[5] = static_cast<std::byte>(header.index);
+  out[6] = static_cast<std::byte>(header.block_size);
+  out[7] = static_cast<std::byte>(header.parity ? 1 : 0);
+  out[8] = static_cast<std::byte>((header.original_length >> 8U) & 0xFFU);
+  out[9] = static_cast<std::byte>(header.original_length & 0xFFU);
   return kFecHeaderSize;
 }
 
 std::optional<FecSymbolHeader> parse_fec_header(std::span<const std::byte> bytes) noexcept {
   if (bytes.size() < kFecHeaderSize) return std::nullopt;
+  if (bytes[0] != kFecTag) return std::nullopt;
 
   FecSymbolHeader header{};
-  header.block_id = read_u32(bytes, 0);
-  header.index = static_cast<std::uint8_t>(bytes[4]);
-  header.block_size = static_cast<std::uint8_t>(bytes[5]);
-  header.parity = bytes[6] != std::byte{0};
+  header.block_id = read_u32(bytes, 1);
+  header.index = static_cast<std::uint8_t>(bytes[5]);
+  header.block_size = static_cast<std::uint8_t>(bytes[6]);
+  header.parity = bytes[7] != std::byte{0};
   header.original_length = static_cast<std::uint16_t>(
-      (static_cast<unsigned>(bytes[7]) << 8U) | static_cast<unsigned>(bytes[8]));
+      (static_cast<unsigned>(bytes[8]) << 8U) | static_cast<unsigned>(bytes[9]));
 
-  if (header.block_size < kMinimumFecBlock || header.block_size > kMaximumFecBlock) {
-    return std::nullopt;
-  }
+  if (header.block_size == 0 || header.block_size > kMaximumFecBlock) return std::nullopt;
   if (!header.parity && header.index >= header.block_size) return std::nullopt;
   return header;
 }
@@ -100,7 +100,10 @@ std::optional<std::span<const std::byte>> FecEncoder::flush() {
   header.block_id = block_id_;
   header.index = static_cast<std::uint8_t>(index_);
 
-  header.block_size = static_cast<std::uint8_t>(std::max(index_, kMinimumFecBlock));
+  // The true symbol count, not the configured block size: a block flushed
+  // early is short, and a decoder told otherwise waits for symbols that were
+  // never sent.
+  header.block_size = static_cast<std::uint8_t>(index_);
   header.parity = true;
   header.original_length = static_cast<std::uint16_t>(widest_);
 
@@ -155,6 +158,14 @@ std::optional<std::vector<std::byte>> FecDecoder::receive(const FecSymbolHeader&
   if (header.parity) {
     if (block->have_parity) return std::nullopt;
     block->have_parity = true;
+    // Parity is authoritative on how many symbols the block actually holds:
+    // a block flushed early is shorter than the configured size the data
+    // symbols advertised.
+    if (header.block_size < block->size) {
+      block->size = header.block_size;
+      block->present.resize(header.block_size);
+      block->lengths.resize(header.block_size);
+    }
   } else {
     if (header.index >= block->present.size()) return std::nullopt;
 

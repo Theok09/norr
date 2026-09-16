@@ -67,21 +67,31 @@ void test_header_roundtrip() {
   NORR_CHECK(!parsed->parity);
   NORR_CHECK(parsed->original_length == 1400);
 
-  // A block size outside the fixed range is malformed: accepting it would let
-  // a peer choose how much state we allocate.
+  // An oversized block is malformed: accepting it would let a peer choose how
+  // much state we allocate. A short one is legitimate - a block flushed while
+  // idle carries fewer symbols than the configured size.
   auto bad = bytes;
-  bad[5] = std::byte{200};
+  bad[6] = std::byte{200};
   NORR_CHECK(!norr::parse_fec_header(bad).has_value());
-  bad[5] = std::byte{1};
+  bad[6] = std::byte{0};
   NORR_CHECK(!norr::parse_fec_header(bad).has_value());
 
   // An index beyond the block is equally malformed.
   auto bad_index = bytes;
-  bad_index[4] = std::byte{9};
+  bad_index[5] = std::byte{9};
   NORR_CHECK(!norr::parse_fec_header(bad_index).has_value());
+
+  // Anything that is not tagged as a FEC symbol is not one. This is what lets
+  // a handshake share the wire with symbols.
+  auto untagged = bytes;
+  untagged[0] = std::byte{0x11};
+  NORR_CHECK(!norr::parse_fec_header(untagged).has_value());
+  NORR_CHECK(!norr::looks_like_fec_symbol(untagged));
+  NORR_CHECK(norr::looks_like_fec_symbol(bytes));
 
   // Truncated input is refused rather than read past.
   NORR_CHECK(!norr::parse_fec_header(std::span{bytes}.first(4)).has_value());
+  NORR_CHECK(!norr::parse_fec_header({}).has_value());
 
   std::puts("fec: header round-trip and validation OK");
 }
@@ -134,6 +144,44 @@ void test_recovers_one_loss() {
   NORR_CHECK(decoder.stats().recovered == 1);
 
   std::puts("fec: recovers a single lost symbol OK");
+}
+
+// A block that stops filling and is flushed early carries fewer symbols than
+// the configured size. The parity must say so, or the decoder waits forever
+// for symbols the sender never produced - which is what made small flows
+// unprotected.
+void test_short_block_recovers() {
+  norr::FecEncoder encoder{norr::FecMode::light};
+
+  const auto first = packet_of(48, 0xA1);
+  const auto second = packet_of(48, 0xB2);
+  NORR_CHECK(!encoder.add(first).has_value());
+  NORR_CHECK(!encoder.add(second).has_value());
+
+  const auto flushed = encoder.flush();
+  NORR_CHECK(flushed.has_value());
+  const std::vector<std::byte> parity(flushed->begin(), flushed->end());
+
+  const auto parity_header = norr::parse_fec_header(parity);
+  NORR_CHECK(parity_header.has_value());
+  NORR_CHECK(parity_header->block_size == 2);
+
+  norr::FecDecoder decoder;
+  const auto now = norr::Instant{};
+
+  // The data symbols advertise the configured block size; only the parity
+  // knows the block was cut short.
+  const norr::FecSymbolHeader data_header{
+      .block_id = 0, .index = 0, .block_size = 32, .parity = false,
+      .original_length = 48};
+  NORR_CHECK(!decoder.receive(data_header, first, now).has_value());
+
+  const auto recovered = decoder.receive(
+      *parity_header, std::span{parity}.subspan(norr::kFecHeaderSize), now);
+  NORR_CHECK(recovered.has_value());
+  NORR_CHECK(std::equal(second.begin(), second.end(), recovered->begin()));
+
+  std::puts("fec: a short flushed block still recovers OK");
 }
 
 void test_two_losses_unrecoverable() {
@@ -269,6 +317,7 @@ int main() {
   test_off_produces_nothing();
   test_header_roundtrip();
   test_recovers_one_loss();
+  test_short_block_recovers();
   test_two_losses_unrecoverable();
   test_duplicate_symbol_ignored();
   test_deadline_and_bounds();

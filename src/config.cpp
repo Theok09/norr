@@ -237,8 +237,9 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       config.qos_burst_bytes = *burst;
     } else if (qualified == "fec.mode") {
       if (value == "off") config.fec = FecMode::off;
-      else if (value == "adaptive") config.fec = FecMode::adaptive;
-      else if (value == "fixed") config.fec = FecMode::fixed;
+      else if (value == "light") config.fec = FecMode::light;
+      else if (value == "moderate") config.fec = FecMode::moderate;
+      else if (value == "aggressive") config.fec = FecMode::aggressive;
       else return fail(ConfigError::invalid_value);
     } else if (qualified == "observability.metrics") {
       const auto flag = parse_bool(value);

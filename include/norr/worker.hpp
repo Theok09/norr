@@ -15,6 +15,7 @@
 #include "norr/routing.hpp"
 #include "norr/session.hpp"
 #include "norr/carrier.hpp"
+#include "norr/fec.hpp"
 #include "norr/tun.hpp"
 #include "norr/udp_transport.hpp"
 
@@ -100,11 +101,30 @@ class Worker {
 
   void enable_queueing(double bytes_per_second, std::size_t burst_bytes, Instant now);
 
+  // Turns forward error correction on for outbound traffic.
+  //
+  // Each sealed packet carries a FEC header naming its block and index, and a
+  // parity symbol follows every complete block. A receiver that loses one
+  // symbol of a block reconstructs it from the parity instead of waiting for a
+  // retransmission that a tunnel cannot provide.
+  //
+  // Off by default: on a clean path the header and the parity are pure
+  // overhead, which is why `mode_for_loss` exists to choose a block size from
+  // measured loss rather than from a guess.
+  void enable_fec(FecMode mode);
+
+  [[nodiscard]] FecMode fec_mode() const noexcept { return encoder_.mode(); }
+  [[nodiscard]] const FecStats& fec_stats() const noexcept { return encoder_.stats(); }
+  [[nodiscard]] const FecStats& fec_decode_stats() const noexcept { return decoder_.stats(); }
+
   [[nodiscard]] bool queueing_enabled() const noexcept { return queueing_enabled_; }
   [[nodiscard]] const Scheduler& scheduler() const noexcept { return scheduler_; }
   [[nodiscard]] const Pacer& pacer() const noexcept { return pacer_; }
 
-  std::size_t flush(Instant now) { return drain_queue(now); }
+  std::size_t flush(Instant now) {
+    flush_fec(now);
+    return drain_queue(now);
+  }
 
   using IngressFilter = std::function<bool(const Endpoint&, std::span<const std::byte>)>;
 
@@ -122,9 +142,18 @@ class Worker {
   [[nodiscard]] DropReason forward_from_transport(const Endpoint& source,
                                                   std::span<const std::byte> datagram);
 
+  // Processes one sealed packet, with any FEC framing already removed.
+  [[nodiscard]] DropReason forward_sealed(const Endpoint& source,
+                                          std::span<const std::byte> datagram);
+
  private:
 
   [[nodiscard]] std::size_t drain_queue(Instant now);
+
+  // Ships the parity for a block that stopped filling, and drops decoder blocks
+  // whose missing symbol is never going to arrive. Without this the last few
+  // packets of any flow are unprotected and the decoder holds them forever.
+  void flush_fec(Instant now);
 
   TunDevice* tun_;
   Carrier* transport_;
@@ -144,6 +173,12 @@ class Worker {
 
   IngressFilter ingress_filter_;
   ProvisionalOpener provisional_opener_;
+
+  FecEncoder encoder_;
+  FecDecoder decoder_;
+  std::vector<std::byte> fec_buffer_;
+  Instant last_fec_symbol_{};
+  Endpoint fec_destination_{};
 
   WorkerStats stats_{};
 };

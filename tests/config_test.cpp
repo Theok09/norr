@@ -28,7 +28,7 @@ rate_bytes = 12500000
 burst_bytes = 65536
 
 [fec]
-mode = "adaptive"
+mode = "moderate"
 
 [observability]
 metrics = true
@@ -60,7 +60,7 @@ int main() {
   NORR_CHECK(valid->network.mtu == norr::kAutomaticMtu);
   NORR_CHECK(valid->transport == norr::TransportMode::automatic);
   NORR_CHECK(valid->qos_enabled);
-  NORR_CHECK(valid->fec == norr::FecMode::adaptive);
+  NORR_CHECK(valid->fec == norr::FecMode::moderate);
   NORR_CHECK(valid->metrics_enabled);
   NORR_CHECK(valid->qos_rate_bytes == 12'500'000);
   NORR_CHECK(valid->qos_burst_bytes == 65'536);
