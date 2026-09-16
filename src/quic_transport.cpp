@@ -53,6 +53,10 @@ constexpr std::size_t kMinimumInitialDatagram = 1200;
 
 constexpr std::string_view kAlpn = "norr/1";
 
+constexpr std::uint64_t kDatagramFrameOverhead = 9;
+
+constexpr std::uint64_t kQuicPacketOverhead = 48;
+
 [[nodiscard]] ngtcp2_tstamp now_timestamp() noexcept {
   const auto now = std::chrono::steady_clock::now().time_since_epoch();
   return static_cast<ngtcp2_tstamp>(
@@ -307,9 +311,19 @@ void Ngtcp2Connection::close() noexcept {
 
 std::size_t Ngtcp2Connection::max_datagram_size() const noexcept {
   if (impl_->conn == nullptr) return 0;
-  const auto limit = ngtcp2_conn_get_max_tx_udp_payload_size(impl_->conn);
 
-  return limit > 64 ? limit - 64 : 0;
+  const auto* remote = ngtcp2_conn_get_remote_transport_params(impl_->conn);
+  if (remote == nullptr || remote->max_datagram_frame_size == 0) return 0;
+
+  const auto overhead = kDatagramFrameOverhead + kQuicPacketOverhead;
+
+  const auto advertised = remote->max_datagram_frame_size;
+  const auto by_peer = advertised > overhead ? advertised - overhead : 0;
+
+  const auto path_limit = ngtcp2_conn_get_max_tx_udp_payload_size(impl_->conn);
+  const auto by_path = path_limit > overhead ? path_limit - overhead : 0;
+
+  return std::min(static_cast<std::size_t>(by_peer), static_cast<std::size_t>(by_path));
 }
 
 const QuicStats& Ngtcp2Connection::stats() const noexcept { return impl_->stats; }

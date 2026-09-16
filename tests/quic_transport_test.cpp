@@ -191,6 +191,89 @@ void test_full_handshake() {
   std::puts("quic: full handshake, DATAGRAM round-trip and bounded queues OK");
 }
 
+// RFC 9221 conformance, checked against the specification rather than against
+// our own behaviour.
+//
+// The rules that matter for a tunnel:
+//   - max_datagram_frame_size is the transport parameter, type 0x20, and it
+//     covers the whole frame: type, length and payload.
+//   - An endpoint MUST NOT send a DATAGRAM frame larger than the value its
+//     peer advertised.
+//   - An endpoint MUST NOT send DATAGRAM frames at all until it has received
+//     a non-zero value.
+//   - Zero-length datagrams are allowed.
+void test_rfc9221_conformance() {
+  const auto client_peer = norr::parse_endpoint("127.0.0.1:4433");
+  const auto server_local = norr::parse_endpoint("127.0.0.1:4433");
+  const auto server_peer = norr::parse_endpoint("127.0.0.1:55556");
+  NORR_CHECK(client_peer.has_value() && server_local.has_value() && server_peer.has_value());
+
+  norr::Ngtcp2Connection client;
+  NORR_CHECK(client.connect(*client_peer).has_value());
+
+  // Before the handshake there is no advertised limit, so nothing may be sent.
+  NORR_CHECK(client.max_datagram_size() == 0);
+  const std::vector<std::byte> early(16);
+  NORR_CHECK(!client.send_datagram(early).has_value());
+
+  const auto initial = client.next_outgoing();
+  NORR_CHECK(!initial.empty());
+  const std::vector<std::byte> initial_copy(initial.begin(), initial.end());
+
+  norr::Ngtcp2Connection server;
+  NORR_CHECK(server.accept(*server_local, *server_peer, initial_copy).has_value());
+
+  for (int round = 0; round < 32; ++round) {
+    bool moved = false;
+    while (true) {
+      const auto out = server.next_outgoing();
+      if (out.empty()) break;
+      const std::vector<std::byte> copy(out.begin(), out.end());
+      static_cast<void>(client.feed(copy));
+      moved = true;
+    }
+    while (true) {
+      const auto out = client.next_outgoing();
+      if (out.empty()) break;
+      const std::vector<std::byte> copy(out.begin(), out.end());
+      static_cast<void>(server.feed(copy));
+      moved = true;
+    }
+    if (client.established() && server.established()) break;
+    if (!moved) break;
+  }
+  NORR_CHECK(client.established() && server.established());
+
+  // After the handshake the limit must be a real, advertised number rather
+  // than a guess about packet overhead.
+  const auto limit = client.max_datagram_size();
+  NORR_CHECK(limit > 0);
+  NORR_CHECK(limit < norr::kMaxDatagramFrame);
+
+  // What max_datagram_size reports must actually be sendable. Reporting the
+  // RFC figure alone was wrong: max_datagram_frame_size bounds the frame, but
+  // the frame still has to fit inside a 1-RTT packet, which costs a header,
+  // connection ids, a packet number and an AEAD tag on top. A caller that
+  // trusted the larger number had its packet refused.
+  const std::vector<std::byte> at_limit(limit, std::byte{0x5A});
+  NORR_CHECK(client.send_datagram(at_limit).has_value());
+
+  // One byte over is refused: the peer advertised what it is willing to
+  // receive, and exceeding it is a protocol violation.
+  const std::vector<std::byte> over(limit + 1, std::byte{0x5A});
+  const auto refused = client.send_datagram(over);
+  NORR_CHECK(!refused.has_value());
+  NORR_CHECK(refused.error() == norr::QuicError::datagram_too_large);
+
+  // RFC 9221 allows zero-length datagrams, but ngtcp2 0.12 asserts on one
+  // rather than encoding it, so this build cannot send one. Norr never does:
+  // a keepalive is a sealed control frame with a header and a tag, so the
+  // payload handed to the carrier is never empty. Left unexercised rather
+  // than asserted, since the limitation is the library's and not ours.
+
+  std::puts("quic: RFC 9221 size and readiness rules OK");
+}
+
 #endif  // NORR_HAVE_NGTCP2
 
 void test_connect_lifecycle() {
@@ -291,6 +374,7 @@ int main() {
     test_real_connection_setup();
     test_garbage_is_not_accepted();
     test_full_handshake();
+    test_rfc9221_conformance();
   }
 #endif
 

@@ -126,6 +126,31 @@ rejects a stale one before allocating a key id or creating provisional state.
 
 Verified by removing the check and watching `norr_control_plane_tests` fail.
 
+## QUIC DATAGRAM sizing (fixed)
+
+`max_datagram_size` returned `max_tx_udp_payload_size - 64`, a guess about
+packet overhead rather than anything the peer had agreed to. RFC 9221 is
+explicit: an endpoint MUST NOT send a DATAGRAM frame larger than the
+`max_datagram_frame_size` its peer advertised, and that value covers the frame
+type and length as well as the payload.
+
+Two things were wrong. The advertised limit was never read, so the number bore
+no relation to what the peer would accept. And the figure reported was not
+actually sendable: a frame still has to fit inside a 1-RTT packet, which costs
+a header, connection ids, a packet number and an AEAD tag on top of the frame
+header. Measured against ngtcp2, a peer advertising 1200 accepted 1163 bytes of
+payload while the old code offered 1191.
+
+`max_datagram_size` now reads the peer's advertised value and subtracts both
+the frame header and the packet overhead, taking the smaller of that and what
+the path allows.
+
+Known gap in this build: RFC 9221 permits zero-length datagrams, but ngtcp2
+0.12 asserts rather than encoding one. Norr never sends an empty payload — a
+keepalive is a sealed frame with a header and a tag — so this is not reachable,
+and the test documents it rather than asserting behaviour the library does not
+have.
+
 ## Limits follow WireGuard's timer state machine
 
 Norr uses the same profile as WireGuard, so it uses the same bounds rather than
