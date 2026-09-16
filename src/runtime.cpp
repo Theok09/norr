@@ -78,12 +78,6 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
     return std::unexpected(Diagnostic{RuntimeError::crypto_unavailable, {}});
   }
 
-  if (config.transport == TransportMode::tcp_tls) {
-    return std::unexpected(Diagnostic{RuntimeError::option_not_implemented,
-                                      "transport.mode: TLS now protects the TCP carrier, but no "
-                                      "TCP listener or carrier selection exists, so a peer cannot "
-                                      "answer"});
-  }
   if (config.transport == TransportMode::quic) {
     return std::unexpected(
         Diagnostic{RuntimeError::option_not_implemented,
@@ -186,8 +180,48 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
 
   listen_port_ = config.listen_port;
 
-  carrier_ = std::make_unique<UdpCarrier>(transport_);
-  active_kind_ = TransportKind::udp;
+  if (config.transport == TransportMode::tcp_tls) {
+    // TCP carries a stream between exactly two endpoints, so the carrier binds
+    // to one peer. A node with a configured endpoint dials; one without listens.
+    const PeerConfig* partner = nullptr;
+    for (PeerId peer = 1; peer <= peer_count_; ++peer) {
+      const auto* candidate = control_->find_peer(peer);
+      if (candidate == nullptr) continue;
+      partner = candidate;
+      if (candidate->endpoint.has_value()) break;
+    }
+    if (partner == nullptr) {
+      return std::unexpected(Diagnostic{RuntimeError::control_failed,
+                                        "transport.mode = tcp-tls needs a configured peer"});
+    }
+    if (peer_count_ > 1) {
+      return std::unexpected(
+          Diagnostic{RuntimeError::option_not_implemented,
+                     "transport.mode = tcp-tls carries one peer per connection; "
+                     "configure a single peer or use udp"});
+    }
+    if (!tls_available()) {
+      return std::unexpected(Diagnostic{RuntimeError::option_not_implemented,
+                                        "transport.mode = tcp-tls needs a TLS backend"});
+    }
+
+    const auto dialing = partner->endpoint.has_value();
+    Endpoint far = dialing ? *partner->endpoint : *bind_address;
+
+    if (!dialing) {
+      if (const auto listening = tcp_listener_.listen(*bind_address); !listening) {
+        return std::unexpected(
+            Diagnostic{RuntimeError::bind_failed,
+                       std::string{transport_error_message(listening.error())}});
+      }
+    }
+
+    carrier_ = std::make_unique<TcpCarrier>(tcp_, far, dialing, partner->preshared);
+    active_kind_ = TransportKind::tcp_tls;
+  } else {
+    carrier_ = std::make_unique<UdpCarrier>(transport_);
+    active_kind_ = TransportKind::udp;
+  }
 
   worker_ = std::make_unique<Worker>(tun_, *carrier_, routes_, sessions_);
 
@@ -346,7 +380,11 @@ void Runtime::send_outgoing(const OutgoingHandshake& outgoing) {
   const OutboundDatagram datagram{.destination = outgoing.destination,
                                   .payload = outgoing.datagram};
   const std::array<OutboundDatagram, 1> batch{datagram};
-  static_cast<void>(transport_.send_batch(batch));
+
+  // Handshakes travel over whichever carrier is active. Writing to the raw UDP
+  // socket instead would work only when UDP is the carrier, and silently send
+  // into nowhere when it is not.
+  static_cast<void>(carrier_->send_batch(batch));
 }
 
 void Runtime::send_keepalive(PeerId peer) {
@@ -361,6 +399,33 @@ void Runtime::send_keepalive(PeerId peer) {
                                   .payload = std::span{frame}.first(*sealed)};
   const std::array<OutboundDatagram, 1> batch{datagram};
   static_cast<void>(carrier_->send_batch(batch));
+}
+
+void Runtime::service_tcp_carrier(Instant now) {
+  if (active_kind_ != TransportKind::tcp_tls) return;
+
+  const auto was_ready = tcp_ready_;
+
+  if (tcp_listener_.listening() && !tcp_.connected() &&
+      tcp_.state() != TcpState::connecting) {
+    auto incoming = tcp_listener_.accept();
+    if (incoming && incoming->has_value()) {
+      tcp_ = std::move(**incoming);
+    }
+  }
+
+  auto* tcp_carrier = dynamic_cast<TcpCarrier*>(carrier_.get());
+  if (tcp_carrier == nullptr) return;
+
+  tcp_carrier->poll(now);
+  tcp_ready_ = tcp_carrier->ready();
+
+  // A TCP carrier has nowhere to send until the connection and its TLS
+  // handshake are up, so the Noise handshake waits for that rather than being
+  // dialled at startup and silently dropped.
+  if (tcp_ready_ && !was_ready) {
+    static_cast<void>(dial_configured_peers());
+  }
 }
 
 void Runtime::redial_dead_peers(Instant now) {
@@ -431,6 +496,7 @@ void Runtime::run() {
     control_->evaluate_load(control_->pending(), ControlPlane::kMaximumPending, now);
     sessions_.expire_retired(now);
     redial_dead_peers(now);
+    service_tcp_carrier(now);
 
     if (reload_requested_.exchange(false, std::memory_order_relaxed)) {
       const auto applied = reload(config_path_);

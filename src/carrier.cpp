@@ -3,6 +3,87 @@
 #include <array>
 
 namespace norr {
+void TcpCarrier::poll(Instant now) {
+  static_cast<void>(now);
+
+  if (dialing_ && transport_->state() == TcpState::closed) {
+    tls_started_ = false;
+    static_cast<void>(transport_->connect(peer_));
+    return;
+  }
+
+  if (transport_->state() == TcpState::connecting) {
+    const auto connected = transport_->poll_connect();
+    if (!connected || !*connected) return;
+  }
+
+  if (transport_->state() == TcpState::failed) {
+    // A failed connection is closed so the next poll redials. The peer keeps
+    // its session: a carrier dropping is not a reason to rekey.
+    transport_->close();
+    tls_started_ = false;
+    return;
+  }
+
+  if (!transport_->connected()) return;
+
+  if (!tls_started_) {
+    const auto role = dialing_ ? TlsRole::client : TlsRole::server;
+    if (transport_->enable_tls(role, "norr", preshared_)) {
+      tls_started_ = true;
+    } else {
+      return;
+    }
+  }
+
+  if (!transport_->tls_established()) {
+    static_cast<void>(transport_->poll_tls());
+  }
+}
+
+std::expected<std::size_t, TransportError> TcpCarrier::send_batch(
+    std::span<const OutboundDatagram> datagrams) {
+  if (!ready()) return std::unexpected(TransportError::not_started);
+
+  std::size_t sent = 0;
+  for (const auto& datagram : datagrams) {
+    const auto result = transport_->send_frame(datagram.payload);
+    if (!result) {
+      // would_block is back pressure, not a failure: the caller retries.
+      if (result.error() == TransportError::would_block) break;
+      ++stats_.tx_errors;
+      return std::unexpected(result.error());
+    }
+    ++sent;
+    ++stats_.tx_packets;
+    stats_.tx_bytes += datagram.payload.size();
+  }
+  return sent;
+}
+
+std::expected<std::size_t, TransportError> TcpCarrier::receive_batch(
+    ReceiveBuffers& buffers, std::span<InboundDatagram> out) {
+  static_cast<void>(buffers);
+  if (out.empty()) return std::size_t{0};
+  if (!ready()) return std::size_t{0};
+
+  inbox_.resize(out.size());
+  const auto received = transport_->receive_frames(inbox_);
+  if (!received) {
+    ++stats_.rx_errors;
+    return std::unexpected(received.error());
+  }
+
+  for (std::size_t index = 0; index < *received; ++index) {
+    // Every frame on this connection came from the one peer at the far end,
+    // so the source is known rather than read from each datagram.
+    out[index] = InboundDatagram{.source = peer_, .payload = inbox_[index]};
+    ++stats_.rx_packets;
+    stats_.rx_bytes += inbox_[index].size();
+  }
+  return *received;
+}
+
 std::expected<std::size_t, TransportError> QuicCarrier::send_batch(
     std::span<const OutboundDatagram> datagrams) {
   if (!connection_->established()) return std::unexpected(TransportError::send_failed);

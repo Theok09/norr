@@ -57,19 +57,28 @@ and there is no QUIC listener, so a peer could not answer a dial.
 Needed: a QUIC listener, and the Noise handshake carried inside QUIC DATAGRAM
 rather than beside it.
 
-## TCP carrier cannot be selected
+## TCP carrier (working)
 
-Observed: `transport.mode = "tcp-tls"` is refused at startup.
+`transport.mode = "tcp-tls"` now carries a tunnel. A node with a configured
+peer endpoint dials; one without listens. TLS 1.3 with the peer's pre-shared
+key protects the connection before any Norr frame crosses it, and the Noise
+handshake waits for that rather than being sent at startup into a connection
+that does not exist yet.
 
-TLS itself is now wired into the carrier and covered by `norr_tcp_tls_tests`:
-frames traverse the TLS 1.3 record layer in both directions, and a frame
-offered before the handshake completes is refused rather than written to the
-raw socket.
+Verified end to end: ICMP across the TLS-protected carrier at 0% loss, with
+both sides reporting a completed handshake. `scripts/e2e_tcp.sh`.
 
-What is still missing is the surrounding machinery: there is no TCP listener
-and no carrier selection, so a peer has nothing to answer a dial with. The
-refusal message says exactly this rather than claiming the carrier is
-unprotected, which it no longer is.
+Two bugs this exposed, both now fixed. Handshakes were written to the raw UDP
+socket rather than the active carrier, so they went nowhere when UDP was not
+carrying. And the dial happened before the carrier existed, so the first
+handshake was dropped and the tunnel sat dead until the rekey timer fired two
+minutes later.
+
+Limits by design: TCP is a stream between two endpoints, so the carrier serves
+exactly one peer. A configuration with more than one peer and
+`transport.mode = "tcp-tls"` is refused rather than silently carrying only the
+first. Head-of-line blocking is inherent — this is a compatibility carrier for
+paths that block UDP, not a replacement for it.
 
 ## FEC is not in the datapath
 

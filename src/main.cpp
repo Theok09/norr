@@ -103,7 +103,11 @@ int run(const std::string& path) {
               config->listen_port, runtime.peer_count());
   std::fflush(stdout);
 
-  const auto dialed = runtime.dial_configured_peers();
+  // The UDP carrier can send immediately. A TCP carrier dials once its
+  // connection and TLS handshake are up, from inside the loop.
+  const auto dialed = runtime.active_transport() == norr::TransportKind::udp
+                          ? runtime.dial_configured_peers()
+                          : 0;
   if (dialed > 0) std::printf("dialing %zu\n", dialed);
   std::fflush(stdout);
 
