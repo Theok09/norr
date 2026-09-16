@@ -1,3 +1,5 @@
+// Norr — encrypted layer 3 tunnel. Copyright (C) 2026 Theok09.
+// Licensed under the GNU AGPL v3 or later. See LICENSE.
 #include "norr/tls.hpp"
 
 #include <algorithm>

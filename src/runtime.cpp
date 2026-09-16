@@ -1,3 +1,5 @@
+// Norr — encrypted layer 3 tunnel. Copyright (C) 2026 Theok09.
+// Licensed under the GNU AGPL v3 or later. See LICENSE.
 #include "norr/runtime.hpp"
 
 #include <array>
@@ -310,6 +312,10 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
     worker_->enable_fec(config.fec);
   }
 
+  if (config.profile != TrafficProfile::standard) {
+    worker_->set_traffic_profile(config.profile);
+  }
+
   if (config.qos_enabled) {
     worker_->enable_queueing(static_cast<double>(config.qos_rate_bytes),
                              config.qos_burst_bytes, std::chrono::steady_clock::now());
@@ -482,7 +488,7 @@ void Runtime::send_outgoing(const OutgoingHandshake& outgoing) {
 }
 
 void Runtime::send_control(PeerId peer, std::span<const std::byte> payload) {
-  auto* session = sessions_.find_by_peer(peer);
+  auto session = sessions_.find_by_peer(peer);
   if (session == nullptr || !session->endpoint().has_value()) return;
 
   std::array<std::byte, kPacketHeaderSize + 1 + kEchoTokenSize + kAeadTagSize> frame{};
@@ -653,7 +659,7 @@ void Runtime::evaluate_transport_paths(Instant now) {
 
   bool hearing = false;
   for (PeerId peer = 1; peer <= peer_count_; ++peer) {
-    auto* session = sessions_.find_by_peer(peer);
+    auto session = sessions_.find_by_peer(peer);
     if (session == nullptr || !session->has_received()) continue;
     if (now - session->last_received() < kTransportSilenceTimeout) {
       hearing = true;
@@ -671,7 +677,13 @@ void Runtime::evaluate_transport_paths(Instant now) {
   const auto retries = control.retries;
   const auto new_retries = retries > last_retries_ ? retries - last_retries_ : 0;
   last_retries_ = retries;
-  const auto stalled = new_retries > 0;
+
+  if (new_retries > 0 && !hearing) {
+    ++consecutive_stalls_;
+  } else {
+    consecutive_stalls_ = 0;
+  }
+  const auto stalled = consecutive_stalls_ >= kStallsBeforeFallback;
 
   // Silence on its own is not failure: a tunnel with nothing to carry is
   // quiet, and condemning it would move a perfectly good carrier. A path is
@@ -728,7 +740,7 @@ void Runtime::evaluate_transport_paths(Instant now) {
   // The peer is reached over a different carrier now, so the session it had is
   // useless: a new handshake establishes one over the path that works.
   for (PeerId peer = 1; peer <= peer_count_; ++peer) {
-    auto* session = sessions_.find_by_peer(peer);
+    auto session = sessions_.find_by_peer(peer);
     if (session != nullptr) sessions_.remove(session->local_key_id());
   }
   static_cast<void>(dial_configured_peers());
@@ -742,7 +754,7 @@ void Runtime::redial_dead_peers(Instant now) {
     const auto* configured = control_->find_peer(peer);
     if (configured == nullptr || !configured->endpoint.has_value()) continue;
 
-    auto* session = sessions_.find_by_peer(peer);
+    auto session = sessions_.find_by_peer(peer);
     if (session == nullptr) continue;
 
     const auto silent = session->has_received() &&
@@ -796,6 +808,7 @@ void Runtime::run() {
     const auto inbound = worker_->pump_udp_to_tun();
     const auto outbound = worker_->pump_tun_to_udp();
     const auto flushed = worker_->flush(now);
+    static_cast<void>(worker_->send_chaff(now));
     const auto worked = inbound > 0 || outbound > 0 || flushed > 0 || handled_control_;
     handled_control_ = false;
 

@@ -1,3 +1,5 @@
+// Norr — encrypted layer 3 tunnel. Copyright (C) 2026 Theok09.
+// Licensed under the GNU AGPL v3 or later. See LICENSE.
 #include "norr/worker.hpp"
 
 #include <algorithm>
@@ -50,7 +52,7 @@ DropReason Worker::forward_from_tun(std::span<const std::byte> frame) {
     return DropReason::no_route;
   }
 
-  auto* session = sessions_->find_by_peer(decision.peer);
+  auto session = sessions_->find_by_peer(decision.peer);
   if (session == nullptr) {
     stats_.record_drop(DropReason::no_session);
     return DropReason::no_session;
@@ -61,13 +63,7 @@ DropReason Worker::forward_from_tun(std::span<const std::byte> frame) {
     return DropReason::no_endpoint;
   }
 
-  // Pad the inner packet to a multiple of 16 before sealing, as WireGuard
-  // does. Without it the ciphertext length is exactly the inner packet length,
-  // so an observer reads the size of every packet the tunnel carries.
-  //
-  // No length field is needed to undo it: an IP header carries its own total
-  // length, so the receiver takes that and ignores the rest.
-  const auto padded = padded_length(frame.size());
+  const auto padded = profile_padded_length(profile_, frame.size());
   if (padded > pad_buffer_.size()) {
     stats_.record_drop(DropReason::oversized);
     return DropReason::oversized;
@@ -137,6 +133,7 @@ DropReason Worker::forward_from_tun(std::span<const std::byte> frame) {
     }
 
     static_cast<void>(drain_queue(now));
+    last_outbound_ = now;
     ++stats_.tun_to_udp;
     return DropReason::none;
   }
@@ -151,8 +148,43 @@ DropReason Worker::forward_from_tun(std::span<const std::byte> frame) {
   }
 
   bytes_sent_ += wire.size();
+  last_outbound_ = std::chrono::steady_clock::now();
   ++stats_.tun_to_udp;
   return DropReason::none;
+}
+
+std::size_t Worker::send_chaff(Instant now) {
+  if (profile_ == TrafficProfile::standard) return 0;
+  if (last_outbound_ != Instant{} && now - last_outbound_ < kChaffInterval) return 0;
+
+  const auto buckets = profile_buckets(profile_);
+  if (buckets.empty()) return 0;
+
+  std::size_t sent = 0;
+  sessions_->for_each([&](Session& session) {
+    if (!session.endpoint().has_value()) return;
+
+    const auto length = buckets.front();
+    if (length > pad_buffer_.size()) return;
+    std::fill(pad_buffer_.begin(), pad_buffer_.begin() + static_cast<std::ptrdiff_t>(length),
+              std::byte{0});
+
+    const auto sealed =
+        session.seal(FrameType::control, std::span{pad_buffer_}.first(length), encrypt_buffer_);
+    if (!sealed) return;
+
+    const auto wire = std::span<const std::byte>{encrypt_buffer_}.first(*sealed);
+    const std::array<OutboundDatagram, 1> datagram{
+        OutboundDatagram{.destination = *session.endpoint(), .payload = wire}};
+    if (!transport_->send_batch(datagram)) return;
+
+    bytes_sent_ += wire.size();
+    ++chaff_sent_;
+    ++sent;
+  });
+
+  if (sent > 0) last_outbound_ = now;
+  return sent;
 }
 
 void Worker::enable_fec(FecMode mode) {
@@ -251,7 +283,7 @@ DropReason Worker::forward_sealed(const Endpoint& source, std::span<const std::b
   std::size_t plaintext_length = 0;
   PeerId ingress_peer = kNoPeer;
 
-  auto* session = sessions_->find_by_key_id(view->header.key_id);
+  auto session = sessions_->find_by_key_id(view->header.key_id);
   if (session == nullptr) {
     if (!provisional_opener_) {
       stats_.record_drop(DropReason::no_session);

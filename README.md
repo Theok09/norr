@@ -1,151 +1,191 @@
-# Norr
+<h1 align="center">Norr</h1>
 
-An encrypted Layer-3 tunnel for Linux. Peers are identified by X25519 static
-keys and authenticated with the Noise IKpsk2 pattern; traffic is sealed with
-ChaCha20-Poly1305 behind an 8192-entry replay window.
+<p align="center"><strong>An encrypted Layer&nbsp;3 tunnel for Linux.</strong></p>
 
-Norr carries IP packets, not ports. Each peer is assigned inner prefixes, and
-a packet is only accepted from a peer authorised to send that source address.
+<p align="center">
+  <img alt="licence AGPL-3.0" src="https://img.shields.io/badge/licence-AGPL--3.0-1B4332?style=flat-square">
+  <img alt="Noise IKpsk2" src="https://img.shields.io/badge/Noise-IKpsk2-2D6A4F?style=flat-square">
+  <img alt="C++23" src="https://img.shields.io/badge/C%2B%2B-23-40916C?style=flat-square">
+  <img alt="platform Linux" src="https://img.shields.io/badge/platform-Linux-52B788?style=flat-square">
+</p>
+
+---
+
+Peers are identified by X25519 static keys and authenticated with the Noise
+`IKpsk2` pattern. Traffic is sealed with ChaCha20-Poly1305 behind an 8192-entry
+replay window.
+
+Norr carries IP packets, not ports. Each peer is assigned inner prefixes, and a
+packet is accepted only from a peer authorised to send that source address.
+
+| | |
+|---|---|
+| **Carriers** | UDP, QUIC (RFC 9221 DATAGRAM), TCP + TLS 1.3 |
+| **Fallback** | Automatic — moves off a blocked carrier without operator action |
+| **Loss recovery** | XOR forward error correction, measured 20% → 8% |
+| **Shaping** | Congestion control on a measured round trip; traffic profiles |
 
 ## Install
 
-One command, on Debian or Ubuntu. It installs dependencies, builds, runs the
-test suite, installs, and creates the service account:
+One command on Debian or Ubuntu. It installs dependencies, builds, runs the
+test suite, installs, and creates the service account — and refuses to install
+if the tests fail.
 
-    sudo sh scripts/install.sh
+```sh
+sudo sh scripts/install.sh
+```
 
-It refuses to install if the tests fail. What it does by hand:
+<details>
+<summary>By hand</summary>
 
-    sudo apt-get install -y cmake ninja-build pkg-config \
-        libsodium-dev libgnutls28-dev libngtcp2-dev libngtcp2-crypto-gnutls-dev
+```sh
+sudo apt-get install -y cmake ninja-build pkg-config \
+    libsodium-dev libgnutls28-dev libngtcp2-dev libngtcp2-crypto-gnutls-dev
 
-    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
-    cmake --build build
-    sudo cmake --install build
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+cmake --build build
+sudo cmake --install build
 
-That installs the binary at `/usr/bin/norr`, a systemd unit at
-`/usr/lib/systemd/system/norr.service`, and an example configuration under
-`/usr/share/doc/norr/`.
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin norr
+sudo mkdir -p /etc/norr && sudo chown root:norr /etc/norr && sudo chmod 0750 /etc/norr
+```
 
-Create the service account and configuration directory:
-
-    sudo useradd --system --no-create-home --shell /usr/sbin/nologin norr
-    sudo mkdir -p /etc/norr
-    sudo chown root:norr /etc/norr
-    sudo chmod 0750 /etc/norr
+This installs `/usr/bin/norr`, a systemd unit, and an example configuration
+under `/usr/share/doc/norr/`.
+</details>
 
 ## Configure
 
 Generate a key. The private half goes to stdout and the public half to stderr,
-so a redirect captures the secret without the public key landing in the file:
+so a redirect captures the secret alone.
 
-    sudo sh -c 'norr keygen > /etc/norr/private.key' 
-    sudo chown root:norr /etc/norr/private.key
-    sudo chmod 0640 /etc/norr/private.key
+```sh
+sudo sh -c 'norr keygen > /etc/norr/private.key'
+sudo chown root:norr /etc/norr/private.key
+sudo chmod 0640 /etc/norr/private.key
+```
 
 Norr refuses to start if the key file is readable by anyone else.
 
-Copy the example and edit it:
+**Server** — `/etc/norr/norr.toml`:
 
-    sudo cp /usr/share/doc/norr/norr.toml.example /etc/norr/norr.toml
+```toml
+[node]
+listen_port = 51820
+tun = "norr0"
 
-A minimal two-peer configuration. On the server:
+[identity]
+key_file = "/etc/norr/private.key"
 
-    [node]
-    listen_port = 51820
-    tun = "norr0"
+[network]
+address = "10.99.0.1/32"
 
-    [identity]
-    key_file = "/etc/norr/private.key"
+[[peer]]
+name = "client"
+public_key = "<client public key>"
+preshared_key = "<shared 64-hex secret>"
+allowed_ips = "10.99.0.2/32"
+```
 
-    [network]
-    address = "10.99.0.1/32"
+**Client** — same, plus the endpoint it dials:
 
-    [[peer]]
-    name = "client"
-    public_key = "<client public key>"
-    preshared_key = "<shared 64-hex secret>"
-    allowed_ips = "10.99.0.2/32"
+```toml
+[network]
+address = "10.99.0.2/32"
 
-On the client, add the server's endpoint so it dials:
+[[peer]]
+name = "server"
+public_key = "<server public key>"
+preshared_key = "<the same shared secret>"
+endpoint = "203.0.113.10:51820"
+allowed_ips = "10.99.0.1/32"
+```
 
-    [network]
-    address = "10.99.0.2/32"
+Validate before starting — this catches every error the runtime would hit:
 
-    [[peer]]
-    name = "server"
-    public_key = "<server public key>"
-    preshared_key = "<the same shared secret>"
-    endpoint = "203.0.113.10:51820"
-    allowed_ips = "10.99.0.1/32"
+```sh
+norr check /etc/norr/norr.toml
+```
 
-Validate before starting. This catches every configuration error the runtime
-would otherwise hit at startup:
+<details>
+<summary>Optional: carriers, loss recovery, shaping</summary>
 
-    norr check /etc/norr/norr.toml
+```toml
+[transport]
+mode = "auto"        # udp, quic, tcp-tls, or auto to fall back between them
+profile = "quic"     # pad to sizes a QUIC flow produces; standard, quic, dns
+
+[fec]
+mode = "moderate"    # off, light, moderate, aggressive
+
+[qos]
+enabled = true
+rate_bytes = 12500000
+```
+
+`mode = "auto"` builds every carrier the host supports and moves to one that
+works when the active carrier stops carrying. `[qos]` also enables congestion
+control, which lowers the rate below `rate_bytes` when the path says so and
+never above it.
+</details>
 
 ## Run
 
-Either through systemd:
+```sh
+sudo systemctl enable --now norr
+```
 
-    sudo systemctl enable --now norr
-    systemctl status norr
+Or with the wrapper, which also brings the interface up:
 
-or with the wrapper, which brings the interface up in one command:
+```sh
+sudo norr-quick up norr
+sudo norr-quick status norr
+sudo norr-quick down norr
+```
 
-    sudo norr-quick up norr
-    sudo norr-quick status norr
-    sudo norr-quick down norr
+A bare name means `/etc/norr/<name>.toml`; a path is used as given.
 
-A bare name means `/etc/norr/<name>.toml`; a path is used as given. The wrapper
-starts the daemon, waits for the device, then applies the addresses, MTU and
-routes the configuration implies — the same split `wg-quick` uses.
+The daemon never configures addresses or routes — that needs privileges it
+drops at startup. `norr-quick` is the other half; `norr interface <file>`
+prints what a configuration implies if you would rather apply it yourself.
 
-The unit runs as an unprivileged user with only `CAP_NET_ADMIN`, which Norr
-needs to create the TUN device and drops once it exists. Core dumps are
-disabled, because a core file from a tunnel contains session keys.
+```sh
+sudo ip addr add 10.99.0.1/32 dev norr0
+sudo ip link set norr0 up
+sudo ip route add 10.99.0.2/32 dev norr0
 
-The daemon itself never configures the interface address or routes: that needs
-privileges it gives up at startup. `norr-quick` is the other half, and
-`norr interface <file>` prints what a configuration implies if you would rather
-apply it yourself:
+ping -I 10.99.0.2 10.99.0.1
+```
 
-    sudo ip addr add 10.99.0.1/32 dev norr0
-    sudo ip link set norr0 up
-    sudo ip route add 10.99.0.2/32 dev norr0
-
-Under systemd, make these persistent through your distribution's network
-configuration rather than by hand.
-
-Verify traffic is flowing:
-
-    ping -I 10.99.0.2 10.99.0.1
+The unit runs unprivileged with only `CAP_NET_ADMIN`, which Norr drops once the
+TUN device exists. Core dumps are disabled: a core file from a tunnel contains
+session keys.
 
 ## Observe
 
-Set an address to expose Prometheus metrics:
+```toml
+[observability]
+metrics = true
+listen = "127.0.0.1:9101"
+```
 
-    [observability]
-    metrics = true
-    listen = "127.0.0.1:9101"
+Exports packets encrypted and decrypted, drops labelled by reason, handshake
+and cookie counters, and session counts. The endpoint is unauthenticated, so
+bind it to loopback or a management address.
 
-The endpoint is unauthenticated and reports traffic counters, so bind it to
-loopback or a management address. It exports packets encrypted and decrypted,
-drops labelled by reason, handshake and cookie counters, and session counts.
+## Status
 
-## What works, and what does not
+Verified end to end on Linux against a private test suite: every carrier,
+automatic fallback under a blocked UDP path, multi-peer routing, rekey without
+loss, recovery after a peer restart, IPv6, FEC recovery under induced loss,
+reload without restart, and QoS pacing.
 
-Verified end to end on Linux: the UDP carrier, multi-peer hub-and-spoke
-routing, rekey without packet loss, keepalive through NAT, QoS pacing, the
-metrics endpoint, and TLS 1.3 over the TCP carrier.
+Norr has **not** been run outside a container. Every measurement here comes
+from network namespaces, where latency is near zero and there is no NAT and no
+censorship. Treat field maturity as zero.
 
-Not finished, and refused at startup rather than silently ignored: QUIC and
-TCP carrier selection, and FEC. Setting `transport.mode` to `quic` or
-`tcp-tls`, or `fec.mode` to anything but `off`, fails with a message saying
-why.
-
-`docs/known-limitations.md` records each gap, what was observed, and what
-closing it needs.
+`docs/known-limitations.md` records each gap: what was observed, and what
+closing it would need.
 
 ## Design
 
@@ -153,40 +193,33 @@ Linux-first. The datapath uses `/dev/net/tun` with `recvmmsg` and `sendmmsg`.
 The project builds on macOS for development, but every datapath entry point
 reports `unsupported_platform` there rather than pretending to work.
 
-The byte-level wire format is defined by `include/norr/packet.hpp` and
+The wire format is defined by `include/norr/packet.hpp` and
 `include/norr/handshake_frame.hpp`.
 
 Norr deliberately does not implement custom cryptographic primitives, IP
-spoofing, traffic-classification evasion, or TCP-over-TCP.
+spoofing, or TCP-over-TCP.
 
 ## Development
 
-    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-    cmake --build build
-    ctest --test-dir build --output-on-failure
+```sh
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build
+```
 
-Add `-DNORR_ENABLE_SANITIZERS=ON` for AddressSanitizer and UndefinedBehaviorSanitizer.
+Add `-DNORR_ENABLE_SANITIZERS=ON` for AddressSanitizer and
+UndefinedBehaviorSanitizer, or `-DNORR_BUILD_FUZZERS=ON` for one libFuzzer
+target per untrusted-input parser.
 
-The datapath tests need a real TUN device. From a macOS host, run them in a
-container with the capability granted, or they report themselves as skipped:
-
-    docker run --rm --cap-add=NET_ADMIN --device=/dev/net/tun \
-      -v "$PWD":/src -w /src silkeh/clang:19 bash -c '
-        apt-get update -qq && apt-get install -y -qq cmake ninja-build pkg-config \
-            libsodium-dev libgnutls28-dev libngtcp2-dev libngtcp2-crypto-gnutls-dev
-        cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Debug
-        cmake --build build-linux
-        ctest --test-dir build-linux --output-on-failure'
-
-Two integration scripts run real tunnels between network namespaces:
-`scripts/e2e_tunnel.sh` for two nodes, `scripts/e2e_multipeer.sh` for a hub
-with two spokes. Both need root.
-
-Fuzz targets are built with `-DNORR_BUILD_FUZZERS=ON`, one per untrusted-input
-parser. Linux and Clang use libFuzzer; macOS lacks the runtime and builds
-deterministic smoke drivers over the same entry points instead, which is a rot
-check rather than fuzz coverage.
+The test suite is not distributed with this repository.
 
 ## Licence
 
-MIT. See `LICENSE`, which also records the terms of the libraries Norr links.
+GNU AGPL v3 or later. Copyright © 2026 Theok09 &lt;chariset38@gmail.com&gt;.
+
+You may use, study, modify and redistribute Norr. If you redistribute it, or
+run a modified version as a network service others connect to, you must release
+your complete corresponding source under the same licence. Running an
+unmodified copy privately carries no such obligation.
+
+See [`LICENSE`](LICENSE) for the full terms, and for the licences of the
+libraries Norr links against.

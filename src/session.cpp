@@ -1,3 +1,5 @@
+// Norr — encrypted layer 3 tunnel. Copyright (C) 2026 Theok09.
+// Licensed under the GNU AGPL v3 or later. See LICENSE.
 #include "norr/session.hpp"
 
 #include <algorithm>
@@ -14,6 +16,8 @@ Session::Session(PeerId peer, std::uint16_t local_key_id, std::uint16_t remote_k
 std::expected<std::size_t, SessionError> Session::seal(FrameType type,
                                                        std::span<const std::byte> plaintext,
                                                        std::span<std::byte> out) {
+  const std::lock_guard lock{*guard_};
+
   const auto required = kPacketHeaderSize + plaintext.size() + kAeadTagSize;
   if (out.size() < required) return std::unexpected(SessionError::buffer_too_small);
 
@@ -57,6 +61,8 @@ std::expected<std::size_t, SessionError> Session::seal(FrameType type,
 std::expected<std::size_t, SessionError> Session::open(const PacketView& view,
                                                        std::span<const std::byte> packet,
                                                        std::span<std::byte> out) {
+  const std::lock_guard lock{*guard_};
+
   if (packet.size() < kPacketHeaderSize) return std::unexpected(SessionError::buffer_too_small);
 
   if (view.header.counter < replay_.highest_accepted() &&
@@ -104,19 +110,16 @@ std::expected<std::uint16_t, SessionError> SessionTable::allocate_key_id() {
   return std::unexpected(SessionError::key_id_exhausted);
 }
 
-std::expected<Session*, SessionError> SessionTable::install(PeerId peer,
-                                                            std::uint16_t local_key_id,
-                                                            std::uint16_t remote_key_id,
-                                                            TrafficKeys send_keys,
-                                                            TrafficKeys receive_keys) {
+std::expected<std::shared_ptr<Session>, SessionError> SessionTable::install(
+    PeerId peer, std::uint16_t local_key_id, std::uint16_t remote_key_id,
+    TrafficKeys send_keys, TrafficKeys receive_keys) {
   return install(peer, local_key_id,
                  Session{peer, local_key_id, remote_key_id, std::move(send_keys),
                          std::move(receive_keys)});
 }
 
-std::expected<Session*, SessionError> SessionTable::install(PeerId peer,
-                                                            std::uint16_t local_key_id,
-                                                            Session session) {
+std::expected<std::shared_ptr<Session>, SessionError> SessionTable::install(
+    PeerId peer, std::uint16_t local_key_id, Session session) {
   if (peer == kNoPeer) return std::unexpected(SessionError::unknown_peer);
   if (local_key_id == kPreSessionKeyId) return std::unexpected(SessionError::unknown_key_id);
   if (sessions_.size() >= kMaximumSessions) {
@@ -136,14 +139,15 @@ std::expected<Session*, SessionError> SessionTable::install(PeerId peer,
 
   std::erase_if(retired_, [&](const Retired& entry) { return entry.key_id == local_key_id; });
 
-  const auto [entry, inserted] = sessions_.try_emplace(local_key_id, std::move(session));
+  const auto [entry, inserted] =
+      sessions_.try_emplace(local_key_id, std::make_shared<Session>(std::move(session)));
   if (!inserted) return std::unexpected(SessionError::unknown_key_id);
 
   by_peer_[peer] = local_key_id;
-  return &entry->second;
+  return entry->second;
 }
 
-Session* SessionTable::find_by_key_id(std::uint16_t key_id) noexcept {
+std::shared_ptr<Session> SessionTable::find_by_key_id(std::uint16_t key_id) noexcept {
   const auto entry = sessions_.find(key_id);
   if (entry == sessions_.end()) return nullptr;
 
@@ -151,7 +155,7 @@ Session* SessionTable::find_by_key_id(std::uint16_t key_id) noexcept {
       std::ranges::any_of(retired_, [&](const Retired& r) { return r.key_id == key_id; });
   if (is_retired) ++retired_receives_;
 
-  return &entry->second;
+  return entry->second;
 }
 
 void SessionTable::expire_retired(Instant now) noexcept {
@@ -162,7 +166,7 @@ void SessionTable::expire_retired(Instant now) noexcept {
   });
 }
 
-Session* SessionTable::find_by_peer(PeerId peer) noexcept {
+std::shared_ptr<Session> SessionTable::find_by_peer(PeerId peer) noexcept {
   const auto mapping = by_peer_.find(peer);
   if (mapping == by_peer_.end()) return nullptr;
   return find_by_key_id(mapping->second);
@@ -174,7 +178,7 @@ void SessionTable::remove(std::uint16_t local_key_id) noexcept {
 
   std::erase_if(retired_, [&](const Retired& r) { return r.key_id == local_key_id; });
 
-  const auto peer = entry->second.peer();
+  const auto peer = entry->second->peer();
   if (const auto mapping = by_peer_.find(peer);
       mapping != by_peer_.end() && mapping->second == local_key_id) {
     by_peer_.erase(mapping);

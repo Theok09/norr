@@ -1,3 +1,5 @@
+// Norr — encrypted layer 3 tunnel. Copyright (C) 2026 Theok09.
+// Licensed under the GNU AGPL v3 or later. See LICENSE.
 #pragma once
 
 #include <atomic>
@@ -187,6 +189,7 @@ class Runtime {
   Instant last_path_check_{};
   std::uint64_t last_tx_errors_{};
   std::uint64_t last_retries_{};
+  std::uint32_t consecutive_stalls_{};
   Instant switched_at_{};
 
   // The most recent measured round trip, from the keepalive echo. Zero until

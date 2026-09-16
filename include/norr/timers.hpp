@@ -1,3 +1,5 @@
+// Norr — encrypted layer 3 tunnel. Copyright (C) 2026 Theok09.
+// Licensed under the GNU AGPL v3 or later. See LICENSE.
 #pragma once
 
 #include <chrono>
@@ -65,6 +67,8 @@ inline constexpr auto kMaximumPlausibleRtt = std::chrono::seconds{30};
 // to react within a few round trips on a real path, rare enough that a sample
 // covers more than a handful of packets.
 inline constexpr auto kCongestionSampleInterval = std::chrono::milliseconds{500};
+
+inline constexpr std::uint32_t kStallsBeforeFallback = 3;
 inline constexpr auto kDeadPeerTimeout = std::chrono::seconds{90};
 inline constexpr auto kRekeyAfter = std::chrono::minutes{2};
 inline constexpr auto kSessionExpiry = std::chrono::minutes{3};

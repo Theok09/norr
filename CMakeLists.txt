@@ -2,7 +2,12 @@ cmake_minimum_required(VERSION 3.25)
 
 project(norr VERSION 0.1.0 LANGUAGES CXX)
 
-option(NORR_BUILD_TESTS "Build unit tests" ON)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/check.hpp)
+    set(NORR_TESTS_DEFAULT ON)
+else()
+    set(NORR_TESTS_DEFAULT OFF)
+endif()
+option(NORR_BUILD_TESTS "Build unit tests" ${NORR_TESTS_DEFAULT})
 # libsodium supplies X25519 and ChaCha20-Poly1305. It is required for the real
 # datapath; without it the crypto layer reports unsupported_platform, exactly as
 # the socket and TUN layers do off Linux, so the project stays buildable on a
@@ -363,18 +368,21 @@ endif()
 # The benchmark harness is a separate executable, not a test: it reports
 # distributions rather than asserting, and a debug build's figures are not
 # comparable to a release build's.
-add_executable(norr_bench bench/main.cpp)
-target_link_libraries(norr_bench PRIVATE norr_core)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/bench/main.cpp)
+    add_executable(norr_bench bench/main.cpp)
+    target_link_libraries(norr_bench PRIVATE norr_core)
 
-# End-to-end benchmark: two real nodes over real sockets, covering the gates
-# in performance/acceptance-gates.md that per-component timing cannot reach.
-add_executable(norr_bench_e2e bench/end_to_end.cpp)
-target_link_libraries(norr_bench_e2e PRIVATE norr_core)
+    # End-to-end benchmark: two real nodes over real sockets, covering the
+    # gates in performance/acceptance-gates.md that per-component timing
+    # cannot reach.
+    add_executable(norr_bench_e2e bench/end_to_end.cpp)
+    target_link_libraries(norr_bench_e2e PRIVATE norr_core)
 
-# Gates E and F: impairment applied by tc netem on a veth pair, so delay and
-# loss are real rather than simulated in the harness.
-add_executable(norr_bench_netem bench/netem.cpp)
-target_link_libraries(norr_bench_netem PRIVATE norr_core)
+    # Gates E and F: impairment applied by tc netem on a veth pair, so delay
+    # and loss are real rather than simulated in the harness.
+    add_executable(norr_bench_netem bench/netem.cpp)
+    target_link_libraries(norr_bench_netem PRIVATE norr_core)
+endif()
 
 if(NORR_BUILD_FUZZERS)
     if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")

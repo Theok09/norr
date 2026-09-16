@@ -1,3 +1,5 @@
+// Norr — encrypted layer 3 tunnel. Copyright (C) 2026 Theok09.
+// Licensed under the GNU AGPL v3 or later. See LICENSE.
 #pragma once
 
 #include <cstdint>
@@ -7,6 +9,7 @@
 #include <vector>
 
 #include "norr/fec.hpp"
+#include "norr/traffic_profile.hpp"
 
 namespace norr {
 enum class ConfigError {
@@ -80,6 +83,7 @@ struct Config {
   std::uint64_t qos_rate_bytes{};
   std::uint64_t qos_burst_bytes{};
   FecMode fec{FecMode::off};
+  TrafficProfile profile{TrafficProfile::standard};
   bool metrics_enabled{false};
   std::string metrics_listen;
   std::string tun_name{"norr0"};
