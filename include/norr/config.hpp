@@ -6,6 +6,8 @@
 #include <string_view>
 #include <vector>
 
+#include "norr/fec.hpp"
+
 namespace norr {
 enum class ConfigError {
   unreadable_file,
@@ -46,7 +48,6 @@ struct ConfigDiagnostic {
 
 enum class NodeRole { server, client };
 enum class TransportMode { automatic, udp, quic, tcp_tls };
-enum class FecMode { off, adaptive, fixed };
 
 inline constexpr std::uint16_t kMinimumMtu = 1280;
 inline constexpr std::uint16_t kMaximumMtu = 9000;

@@ -86,6 +86,9 @@ class Runtime {
   [[nodiscard]] std::size_t peer_count() const noexcept { return peer_count_; }
   [[nodiscard]] const WorkerStats& stats() const;
   [[nodiscard]] const ControlStats& control_stats() const;
+  [[nodiscard]] FecMode fec_mode() const;
+  [[nodiscard]] const FecStats& fec_encode_stats() const;
+  [[nodiscard]] const FecStats& fec_decode_stats() const;
   [[nodiscard]] TransportKind active_transport() const noexcept { return active_kind_; }
   [[nodiscard]] const MetricsServer& metrics() const noexcept { return metrics_; }
 
@@ -119,6 +122,14 @@ class Runtime {
   // A no-op unless the QUIC carrier is the active one.
   void service_quic_carrier();
 
+  // Samples each carrier's health and switches when the active one stops
+  // working. Only runs when more than one carrier was built.
+  void evaluate_transport_paths(Instant now);
+
+  // Builds whichever carriers this configuration and build can support.
+  [[nodiscard]] std::expected<void, RuntimeDiagnostic> build_carriers(
+      const Config& config, const Endpoint& bind_address);
+
   [[nodiscard]] bool dispatch_control(const Endpoint& source,
                                       std::span<const std::byte> datagram);
 
@@ -129,7 +140,9 @@ class Runtime {
   RoutingTable routes_;
   SessionTable sessions_;
   TimerWheel timers_;
-  std::unique_ptr<Carrier> carrier_;
+  // Observes whichever carrier is active. The three below own them, so a
+  // switch is a pointer change and the inactive carriers keep their state.
+  Carrier* carrier_{};
   std::unique_ptr<QuicConnection> quic_;
   TcpTransport tcp_;
   TcpListener tcp_listener_;
@@ -145,6 +158,16 @@ class Runtime {
   std::atomic<bool> reload_requested_{false};
   bool tcp_ready_{};
   bool quic_ready_{};
+
+  // Every carrier that could be used, kept alive so a switch is a pointer
+  // change rather than a reconnection.
+  std::unique_ptr<Carrier> udp_carrier_;
+  std::unique_ptr<Carrier> tcp_carrier_;
+  std::unique_ptr<Carrier> quic_carrier_;
+  PathSelector paths_;
+  bool automatic_fallback_{};
+  Instant last_path_check_{};
+  std::uint64_t last_tx_errors_{};
   std::string config_path_;
   std::uint16_t listen_port_{};
   Instant last_liveness_sweep_{};

@@ -78,11 +78,6 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
     return std::unexpected(Diagnostic{RuntimeError::crypto_unavailable, {}});
   }
 
-  if (config.fec != FecMode::off) {
-    return std::unexpected(Diagnostic{RuntimeError::option_not_implemented,
-                                      "fec.mode: the encoder exists but has no wire framing in the "
-                                      "datapath; set fec.mode = \"off\""});
-  }
 
   const auto private_key = load_private_key(config.identity_key_file);
   if (!private_key) {
@@ -208,7 +203,8 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
     const auto listening = !partner->endpoint.has_value();
     const auto far = listening ? *bind_address : *partner->endpoint;
 
-    carrier_ = std::make_unique<QuicCarrier>(*quic_, transport_, far, *bind_address, listening);
+    quic_carrier_ = std::make_unique<QuicCarrier>(*quic_, transport_, far, *bind_address, listening);
+    carrier_ = quic_carrier_.get();
     active_kind_ = TransportKind::quic;
   } else if (config.transport == TransportMode::tcp_tls) {
     // TCP carries a stream between exactly two endpoints, so the carrier binds
@@ -246,14 +242,47 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
       }
     }
 
-    carrier_ = std::make_unique<TcpCarrier>(tcp_, far, dialing, partner->preshared);
+    tcp_carrier_ = std::make_unique<TcpCarrier>(tcp_, far, dialing, partner->preshared);
+    carrier_ = tcp_carrier_.get();
     active_kind_ = TransportKind::tcp_tls;
   } else {
-    carrier_ = std::make_unique<UdpCarrier>(transport_);
+    udp_carrier_ = std::make_unique<UdpCarrier>(transport_);
+    carrier_ = udp_carrier_.get();
     active_kind_ = TransportKind::udp;
   }
 
+  // "auto" builds every carrier this configuration and build can support, so a
+  // path that stops working can be abandoned for one that still does. A named
+  // mode builds only that one: an operator who asked for QUIC did not ask to
+  // be moved off it.
+  if (config.transport == TransportMode::automatic && peer_count_ == 1) {
+    const auto* partner = control_->find_peer(1);
+    if (partner != nullptr && partner->endpoint.has_value() && tls_available()) {
+      tcp_carrier_ = std::make_unique<TcpCarrier>(tcp_, *partner->endpoint, true,
+                                                  partner->preshared);
+      paths_.add_path(TransportKind::tcp_tls);
+    }
+    if (partner != nullptr && partner->endpoint.has_value() && quic_available()) {
+      auto connection = make_quic_connection();
+      if (connection) {
+        quic_ = std::move(*connection);
+        quic_carrier_ = std::make_unique<QuicCarrier>(*quic_, transport_, *partner->endpoint,
+                                                      *bind_address, false);
+        paths_.add_path(TransportKind::quic);
+      }
+    }
+    if (tcp_carrier_ != nullptr || quic_carrier_ != nullptr) {
+      paths_.add_path(TransportKind::udp);
+      automatic_fallback_ = true;
+      last_path_check_ = std::chrono::steady_clock::now();
+    }
+  }
+
   worker_ = std::make_unique<Worker>(tun_, *carrier_, routes_, sessions_);
+
+  if (config.fec != FecMode::off) {
+    worker_->enable_fec(config.fec);
+  }
 
   if (config.qos_enabled) {
     worker_->enable_queueing(static_cast<double>(config.qos_rate_bytes),
@@ -311,9 +340,10 @@ std::expected<std::size_t, RuntimeDiagnostic> Runtime::reload(const std::string&
     return std::unexpected(Diagnostic{RuntimeError::option_not_implemented,
                                       "transport.mode cannot change on reload"});
   }
-  if (config->fec != FecMode::off) {
+  if (config->fec != worker_->fec_mode()) {
     return std::unexpected(Diagnostic{RuntimeError::option_not_implemented,
-                                      "fec.mode is not implemented"});
+                                      "fec.mode cannot change on reload: the peer would still be "
+                                      "framing symbols the old way"});
   }
 
   // Decode everything before changing anything, so a malformed file leaves the
@@ -444,7 +474,7 @@ void Runtime::service_tcp_carrier(Instant now) {
     }
   }
 
-  auto* tcp_carrier = dynamic_cast<TcpCarrier*>(carrier_.get());
+  auto* tcp_carrier = dynamic_cast<TcpCarrier*>(carrier_);
   if (tcp_carrier == nullptr) return;
 
   tcp_carrier->poll(now);
@@ -461,7 +491,7 @@ void Runtime::service_tcp_carrier(Instant now) {
 void Runtime::service_quic_carrier() {
   if (active_kind_ != TransportKind::quic) return;
 
-  auto* quic_carrier = dynamic_cast<QuicCarrier*>(carrier_.get());
+  auto* quic_carrier = dynamic_cast<QuicCarrier*>(carrier_);
   if (quic_carrier == nullptr) return;
 
   const auto was_ready = quic_ready_;
@@ -474,6 +504,80 @@ void Runtime::service_quic_carrier() {
   if (quic_ready_ && !was_ready) {
     static_cast<void>(dial_configured_peers());
   }
+}
+
+void Runtime::evaluate_transport_paths(Instant now) {
+  if (!automatic_fallback_) return;
+  if (now - last_path_check_ < kKeepaliveInterval) return;
+  last_path_check_ = now;
+
+  // Health comes from what the datapath already observes: whether a session is
+  // still hearing from its peer, and whether the carrier is failing to send.
+  // Inventing a probe would measure the probe.
+  const auto& transport = carrier_->stats();
+  const auto errors = transport.tx_errors + transport.rx_errors;
+  const auto new_errors = errors > last_tx_errors_ ? errors - last_tx_errors_ : 0;
+  last_tx_errors_ = errors;
+
+  bool hearing = false;
+  for (PeerId peer = 1; peer <= peer_count_; ++peer) {
+    auto* session = sessions_.find_by_peer(peer);
+    if (session == nullptr || !session->has_received()) continue;
+    if (now - session->last_received() < kDeadPeerTimeout) {
+      hearing = true;
+      break;
+    }
+  }
+
+  // A handshake that was started but never completed is the other failure
+  // signal: on a blocked path the initiator retries and nothing comes back.
+  // Relying on a live session alone would miss it, because dead-peer detection
+  // removes the session first and leaves nothing to observe.
+  const auto& control = control_->stats();
+  const auto attempted = control.handshakes_started;
+  const auto completed = control.handshakes_completed;
+  const auto stalled = attempted > completed;
+
+  const auto working = hearing && !stalled;
+  const PathSample sample{.rtt_microseconds = 0.0,
+                          .loss_fraction = working ? 0.0 : 1.0,
+                          .transport_errors = new_errors,
+                          .reachable = working};
+  paths_.observe(active_kind_, sample);
+
+  // Nothing has been tried yet: a carrier with no traffic at all is not
+  // failing, it is idle.
+  if (attempted == 0 && new_errors == 0) return;
+  if (working && new_errors == 0) return;
+
+  if (!paths_.evaluate(now)) return;
+
+  const auto chosen = paths_.active();
+  if (chosen == active_kind_) return;
+
+  Carrier* next = nullptr;
+  switch (chosen) {
+    case TransportKind::udp: next = udp_carrier_.get(); break;
+    case TransportKind::tcp_tls: next = tcp_carrier_.get(); break;
+    case TransportKind::quic: next = quic_carrier_.get(); break;
+  }
+  if (next == nullptr) return;
+
+  carrier_ = next;
+  active_kind_ = chosen;
+  worker_->set_carrier(*next);
+  last_tx_errors_ = 0;
+
+  std::fprintf(stderr, "transport: switched to %s\n",
+               std::string{transport_kind_name(chosen)}.c_str());
+
+  // The peer is reached over a different carrier now, so the session it had is
+  // useless: a new handshake establishes one over the path that works.
+  for (PeerId peer = 1; peer <= peer_count_; ++peer) {
+    auto* session = sessions_.find_by_peer(peer);
+    if (session != nullptr) sessions_.remove(session->local_key_id());
+  }
+  static_cast<void>(dial_configured_peers());
 }
 
 void Runtime::redial_dead_peers(Instant now) {
@@ -546,6 +650,7 @@ void Runtime::run() {
     redial_dead_peers(now);
     service_tcp_carrier(now);
     service_quic_carrier();
+    evaluate_transport_paths(now);
 
     if (reload_requested_.exchange(false, std::memory_order_relaxed)) {
       const auto applied = reload(config_path_);
@@ -581,6 +686,20 @@ const WorkerStats& Runtime::stats() const {
 const ControlStats& Runtime::control_stats() const {
   static const ControlStats empty{};
   return control_ ? control_->stats() : empty;
+}
+
+FecMode Runtime::fec_mode() const {
+  return worker_ ? worker_->fec_mode() : FecMode::off;
+}
+
+const FecStats& Runtime::fec_encode_stats() const {
+  static const FecStats empty{};
+  return worker_ ? worker_->fec_stats() : empty;
+}
+
+const FecStats& Runtime::fec_decode_stats() const {
+  static const FecStats empty{};
+  return worker_ ? worker_->fec_decode_stats() : empty;
 }
 
 }

@@ -86,13 +86,44 @@ exactly one peer. A configuration with more than one peer and
 first. Head-of-line blocking is inherent — this is a compatibility carrier for
 paths that block UDP, not a replacement for it.
 
-## FEC is not in the datapath
+## FEC in the datapath (fixed)
 
-Observed: `fec.mode` other than `"off"` is refused at startup.
+Previously `fec.mode` other than `"off"` was refused at startup: the encoder
+and decoder existed, but nothing framed symbols on the wire.
 
-The encoder and decoder are implemented and tested. What is missing is wire
-framing: symbol headers, block identifiers, and the rule for how a block is
-split across packets. That is a protocol change, not a wiring change.
+A FEC symbol is now a Norr packet like any other. Its first byte carries the
+protocol version and `FrameType::fec`, so a receiver tells a symbol from a
+handshake by reading it rather than by knowing what the sender configured. That
+tag is what lets one side enable FEC without the other side breaking, and it is
+why the handshake — which does not go through the FEC encoder — still arrives.
+
+Measured on a veth pair with `tc netem loss 20%` applied in both directions,
+60 pings, `mode = "moderate"`:
+
+| mode | end-to-end loss | symbols recovered |
+|---|---|---|
+| off | 38% | — |
+| light | 10% | 10 |
+| moderate | 0% | 25 |
+| aggressive | 12% | 16 |
+
+Two things had to be right for those numbers. A block that stops filling is
+flushed after `kFecRecoveryDeadline`, or the last packets of every flow go
+unprotected — this is why `light` (block size 32) recovered nothing before the
+flush existed. And the parity symbol reports how many symbols the block
+actually holds rather than the configured size, or the decoder waits for
+symbols the sender never produced.
+
+`scripts/e2e_fec.sh` is the standing proof: it fails if the decoder's
+`recovered` counter is zero, so a run where FEC is merely framed and not
+recovering is a failure even when the pings succeed.
+
+Two honest limits remain. The parity is XOR, so one loss per block is
+recoverable and a second in the same block is not — the `unrecoverable`
+counter reports that. And `aggressive` measures worse than `moderate` here
+because a block size of 4 puts one parity packet on the wire for every four
+data packets, and at 20% loss the parity is lost as often as anything else.
+The mode names describe parity density, not outcome.
 
 ## network.mtu (fixed)
 

@@ -8,6 +8,7 @@
 #include <string_view>
 #include <vector>
 
+#include "norr/packet.hpp"
 #include "norr/rate_limit.hpp"
 
 namespace norr {
@@ -59,7 +60,18 @@ struct FecSymbolHeader {
   std::uint16_t original_length{};
 };
 
-inline constexpr std::size_t kFecHeaderSize = 9;
+// A FEC symbol is a Norr packet whose first byte says so: version in the high
+// nibble, FrameType::fec in the low one. Anything else on the wire - a
+// handshake, a data packet from a peer with FEC off - parses as itself and is
+// never mistaken for a symbol.
+inline constexpr std::size_t kFecHeaderSize = 10;
+
+inline constexpr std::byte kFecTag{static_cast<std::uint8_t>(
+    (kProtocolVersion << 4U) | static_cast<std::uint8_t>(FrameType::fec))};
+
+[[nodiscard]] constexpr bool looks_like_fec_symbol(std::span<const std::byte> bytes) noexcept {
+  return !bytes.empty() && bytes[0] == kFecTag;
+}
 
 [[nodiscard]] std::size_t serialize_fec_header(const FecSymbolHeader& header,
                                                std::span<std::byte> out) noexcept;
