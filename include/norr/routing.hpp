@@ -87,6 +87,12 @@ class RoutingTable {
 
   [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
 
+  // Drops every peer prefix, keeping the local ones.
+  //
+  // A reload rebuilds peer routing from the new configuration. Local addresses
+  // belong to the interface, which a reload does not touch.
+  void clear_peer_routes() noexcept { entries_.clear(); }
+
  private:
   struct Entry {
     Prefix prefix;

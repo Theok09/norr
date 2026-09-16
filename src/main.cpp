@@ -63,6 +63,10 @@ extern "C" void handle_signal(int) {
   if (g_runtime != nullptr) g_runtime->stop();
 }
 
+extern "C" void handle_reload(int) {
+  if (g_runtime != nullptr) g_runtime->request_reload();
+}
+
 int run(const std::string& path) {
   const auto config = norr::load_config_file(path);
   if (!config) {
@@ -76,6 +80,7 @@ int run(const std::string& path) {
   }
 
   norr::Runtime runtime;
+  runtime.set_config_path(path);
   if (const auto started = runtime.start(*config); !started) {
     const auto& problem = started.error();
     std::fprintf(stderr, "%s", std::string{norr::runtime_error_message(problem.error)}.c_str());
@@ -92,6 +97,7 @@ int run(const std::string& path) {
   std::signal(SIGTERM, handle_signal);
 
   std::signal(SIGPIPE, SIG_IGN);
+  std::signal(SIGHUP, handle_reload);
 
   std::printf("%s  port %u  peers %zu\n", runtime.interface_name().c_str(),
               config->listen_port, runtime.peer_count());

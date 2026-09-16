@@ -167,6 +167,48 @@ if ip netns exec norr-b ping -c3 -W3 -I 10.99.0.2 10.99.0.1 >ping.log 2>&1; then
     fi
   fi
 
+  # A reload must add or remove peers without disturbing a live session, and
+  # must refuse a broken configuration rather than half-applying it.
+  if [ "${NORR_RELOAD:-0}" = "1" ]; then
+    extra=$("$NORR" keygen 2>&1 >/dev/null | awk '{print $2}')
+    cat >> a.toml <<PEER
+
+[[peer]]
+name = "spare"
+public_key = "$extra"
+preshared_key = "$PSK"
+allowed_ips = "10.99.0.9/32"
+PEER
+    ip netns pids norr-a 2>/dev/null | head -1 | xargs -r kill -HUP
+    sleep 2
+    if grep -q "reload: 2 peers" a.log; then
+      ok "reload added a peer"
+    else
+      bad "reload did not apply"
+      grep reload a.log || true
+    fi
+
+    if ip netns exec norr-b ping -c3 -W3 -I 10.99.0.2 10.99.0.1 >ping4.log 2>&1; then
+      ok "live session survived the reload"
+    else
+      bad "reload disturbed the live session"
+    fi
+
+    echo "bogus = 1" >> a.toml
+    ip netns pids norr-a 2>/dev/null | head -1 | xargs -r kill -HUP
+    sleep 2
+    if grep -q "reload refused" a.log; then
+      ok "a broken configuration is refused"
+    else
+      bad "a broken configuration was not refused"
+    fi
+    if ip netns exec norr-b ping -c2 -W3 -I 10.99.0.2 10.99.0.1 >/dev/null 2>&1; then
+      ok "tunnel unharmed by the refused reload"
+    else
+      bad "the refused reload broke the tunnel"
+    fi
+  fi
+
   if [ "${NORR_SOAK:-0}" = "1" ]; then
     echo "soak: waiting ${NORR_SOAK_SECONDS:-150}s across the rekey timer"
     sleep "${NORR_SOAK_SECONDS:-150}"

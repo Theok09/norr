@@ -71,6 +71,9 @@ class Runtime {
 
   [[nodiscard]] std::expected<void, RuntimeDiagnostic> start(const Config& config);
 
+  // Remembers where the configuration came from, so a reload can re-read it.
+  void set_config_path(std::string path) { config_path_ = std::move(path); }
+
   void run();
 
   void stop() noexcept { running_.store(false, std::memory_order_relaxed); }
@@ -87,6 +90,18 @@ class Runtime {
   [[nodiscard]] const MetricsServer& metrics() const noexcept { return metrics_; }
 
   [[nodiscard]] std::size_t dial_configured_peers();
+
+  // Re-reads the configuration and applies what can change while running:
+  // the peer set, their keys, endpoints and prefixes.
+  //
+  // Anything bound to the interface or the socket — the TUN name, the listen
+  // port, the addresses, the carrier — is refused rather than half-applied,
+  // because changing those means recreating the device and dropping every
+  // session, which is a restart by another name.
+  [[nodiscard]] std::expected<std::size_t, RuntimeDiagnostic> reload(const std::string& path);
+
+  // Safe to call from a signal handler: it only stores to an atomic flag.
+  void request_reload() noexcept { reload_requested_.store(true, std::memory_order_relaxed); }
 
  private:
 
@@ -116,6 +131,9 @@ class Runtime {
   std::size_t peer_count_{};
 
   bool handled_control_{};
+  std::atomic<bool> reload_requested_{false};
+  std::string config_path_;
+  std::uint16_t listen_port_{};
   Instant last_liveness_sweep_{};
   std::atomic<bool> running_{false};
 };
