@@ -23,6 +23,7 @@ int usage() {
       "\n"
       "  run\n"
       "  check\n"
+      "  interface\n"
       "  keygen\n"
       "  features\n"
       "  hardening\n"
@@ -127,6 +128,34 @@ int run(const std::string& path) {
   return 0;
 }
 
+int interface_plan(const std::string& path) {
+  const auto config = norr::load_config_file(path);
+  if (!config) {
+    const auto& problem = config.error();
+    std::fprintf(stderr, "%s", path.c_str());
+    if (problem.line != 0) std::fprintf(stderr, ":%zu", problem.line);
+    std::fprintf(stderr, ": %s", std::string{norr::config_error_message(problem.error)}.c_str());
+    if (!problem.detail.empty()) std::fprintf(stderr, " (%s)", problem.detail.c_str());
+    std::fputc('\n', stderr);
+    return 1;
+  }
+
+  std::printf("tun %s\n", config->tun_name.c_str());
+  std::printf("port %u\n", config->listen_port);
+  if (config->network.mtu != norr::kAutomaticMtu) {
+    std::printf("mtu %u\n", config->network.mtu);
+  }
+  for (const auto& address : config->network.addresses) {
+    std::printf("address %s\n", address.c_str());
+  }
+  for (const auto& peer : config->peers) {
+    for (const auto& prefix : peer.allowed_ips) {
+      std::printf("route %s\n", prefix.c_str());
+    }
+  }
+  return 0;
+}
+
 int keygen() {
   if (!norr::crypto_available() || !norr::crypto_init()) {
     std::fputs("crypto backend unavailable\n", stderr);
@@ -179,6 +208,9 @@ int main(int argc, char* argv[]) {
                                              : wrong_usage("version");
   if (command == "run") return argc == 3 ? run(argv[2]) : wrong_usage("run <file>");
   if (command == "check") return argc == 3 ? check(argv[2]) : wrong_usage("check <file>");
+  if (command == "interface") {
+    return argc == 3 ? interface_plan(argv[2]) : wrong_usage("interface <file>");
+  }
   if (command == "keygen") return argc == 2 ? keygen() : wrong_usage("keygen");
   if (command == "features") return argc == 2 ? features() : wrong_usage("features");
   if (command == "hardening") return argc == 2 ? hardening() : wrong_usage("hardening");

@@ -86,23 +86,36 @@ would otherwise hit at startup:
 
 ## Run
 
+Either through systemd:
+
     sudo systemctl enable --now norr
     systemctl status norr
+
+or with the wrapper, which brings the interface up in one command:
+
+    sudo norr-quick up norr
+    sudo norr-quick status norr
+    sudo norr-quick down norr
+
+A bare name means `/etc/norr/<name>.toml`; a path is used as given. The wrapper
+starts the daemon, waits for the device, then applies the addresses, MTU and
+routes the configuration implies — the same split `wg-quick` uses.
 
 The unit runs as an unprivileged user with only `CAP_NET_ADMIN`, which Norr
 needs to create the TUN device and drops once it exists. Core dumps are
 disabled, because a core file from a tunnel contains session keys.
 
-Norr does not configure the interface address or routes. Doing so needs
-privileges the process gives up at startup, so it is left to the system. On
-the server:
+The daemon itself never configures the interface address or routes: that needs
+privileges it gives up at startup. `norr-quick` is the other half, and
+`norr interface <file>` prints what a configuration implies if you would rather
+apply it yourself:
 
     sudo ip addr add 10.99.0.1/32 dev norr0
     sudo ip link set norr0 up
     sudo ip route add 10.99.0.2/32 dev norr0
 
-And correspondingly on the client. Make these persistent through your
-distribution's network configuration rather than by hand.
+Under systemd, make these persistent through your distribution's network
+configuration rather than by hand.
 
 Verify traffic is flowing:
 
