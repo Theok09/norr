@@ -184,6 +184,8 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
     ++peer_count_;
   }
 
+  listen_port_ = config.listen_port;
+
   carrier_ = std::make_unique<UdpCarrier>(transport_);
   active_kind_ = TransportKind::udp;
 
@@ -221,6 +223,109 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
   });
 
   return {};
+}
+
+std::expected<std::size_t, RuntimeDiagnostic> Runtime::reload(const std::string& path) {
+  const auto config = load_config_file(path);
+  if (!config) {
+    const auto& problem = config.error();
+    return std::unexpected(Diagnostic{RuntimeError::control_failed,
+                                      std::string{config_error_message(problem.error)} +
+                                          (problem.detail.empty() ? "" : " (" + problem.detail + ")")});
+  }
+
+  // Refuse what cannot change without recreating the device or the socket.
+  if (config->tun_name != tun_.name()) {
+    return std::unexpected(Diagnostic{RuntimeError::option_not_implemented,
+                                      "node.tun cannot change on reload"});
+  }
+  if (config->listen_port != listen_port_) {
+    return std::unexpected(Diagnostic{RuntimeError::option_not_implemented,
+                                      "node.listen_port cannot change on reload"});
+  }
+  if (config->transport != TransportMode::automatic && config->transport != TransportMode::udp) {
+    return std::unexpected(Diagnostic{RuntimeError::option_not_implemented,
+                                      "transport.mode cannot change on reload"});
+  }
+  if (config->fec != FecMode::off) {
+    return std::unexpected(Diagnostic{RuntimeError::option_not_implemented,
+                                      "fec.mode is not implemented"});
+  }
+
+  // Decode everything before changing anything, so a malformed file leaves the
+  // running configuration untouched.
+  struct Incoming {
+    PeerConfig peer;
+    std::vector<Prefix> prefixes;
+  };
+  std::vector<Incoming> incoming;
+  incoming.reserve(config->peers.size());
+
+  for (const auto& entry : config->peers) {
+    Incoming next{};
+    if (!decode_hex(entry.public_key, next.peer.static_public)) {
+      return std::unexpected(Diagnostic{RuntimeError::peer_key_malformed, entry.name});
+    }
+    if (!entry.preshared_key.empty() && !decode_hex(entry.preshared_key, next.peer.preshared)) {
+      return std::unexpected(
+          Diagnostic{RuntimeError::peer_key_malformed, entry.name + ".preshared_key"});
+    }
+    if (!entry.endpoint.empty()) {
+      const auto parsed = parse_endpoint(entry.endpoint);
+      if (!parsed) {
+        return std::unexpected(Diagnostic{RuntimeError::peer_endpoint_malformed, entry.endpoint});
+      }
+      next.peer.endpoint = *parsed;
+    }
+    for (const auto& text : entry.allowed_ips) {
+      const auto prefix = parse_prefix(text);
+      if (!prefix) {
+        return std::unexpected(Diagnostic{RuntimeError::peer_prefix_malformed, text});
+      }
+      next.prefixes.push_back(*prefix);
+    }
+    incoming.push_back(std::move(next));
+  }
+
+  // A peer is identified by its static key, not by its position in the file,
+  // so one that is still present keeps its id and its live session.
+  std::unordered_map<PeerId, bool> still_present;
+  for (PeerId peer = 1; peer <= peer_count_; ++peer) still_present[peer] = false;
+
+  routes_.clear_peer_routes();
+
+  for (auto& next : incoming) {
+    PeerId id = kNoPeer;
+    for (PeerId peer = 1; peer <= peer_count_; ++peer) {
+      const auto* existing = control_->find_peer(peer);
+      if (existing != nullptr &&
+          constant_time_equal(existing->static_public, next.peer.static_public)) {
+        id = peer;
+        break;
+      }
+    }
+    if (id == kNoPeer) id = static_cast<PeerId>(++peer_count_);
+
+    next.peer.id = id;
+    still_present[id] = true;
+
+    for (const auto& prefix : next.prefixes) {
+      if (const auto added = routes_.add(id, prefix); !added) {
+        return std::unexpected(Diagnostic{RuntimeError::routing_conflict,
+                                          std::string{routing_error_message(added.error())}});
+      }
+    }
+    if (const auto installed = control_->add_peer(next.peer); !installed) {
+      return std::unexpected(Diagnostic{RuntimeError::control_failed,
+                                        std::string{control_error_message(installed.error())}});
+    }
+  }
+
+  for (const auto& [peer, present] : still_present) {
+    if (!present) control_->forget_peer(peer);
+  }
+
+  return incoming.size();
 }
 
 std::size_t Runtime::dial_configured_peers() {
@@ -326,6 +431,18 @@ void Runtime::run() {
     control_->evaluate_load(control_->pending(), ControlPlane::kMaximumPending, now);
     sessions_.expire_retired(now);
     redial_dead_peers(now);
+
+    if (reload_requested_.exchange(false, std::memory_order_relaxed)) {
+      const auto applied = reload(config_path_);
+      if (applied) {
+        std::fprintf(stderr, "reload: %zu peers\n", *applied);
+      } else {
+        std::fprintf(stderr, "reload refused: %s%s%s\n",
+                     std::string{runtime_error_message(applied.error().error)}.c_str(),
+                     applied.error().detail.empty() ? "" : ": ",
+                     applied.error().detail.c_str());
+      }
+    }
 
     if (metrics_.listening()) {
       const MetricsSnapshot snapshot{.worker = &worker_->stats(),

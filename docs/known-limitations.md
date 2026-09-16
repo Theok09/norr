@@ -172,6 +172,32 @@ still 16-byte quantised and timing is untouched. Defeating a serious traffic
 analyst needs random padding and cover traffic, which is a larger design
 question than alignment.
 
+## Live reload (added)
+
+The systemd unit declared `ExecReload=/bin/kill -HUP $MAINPID`, but nothing
+handled SIGHUP, so reloading killed the tunnel. That was worse than having no
+reload at all.
+
+SIGHUP now re-reads the configuration and applies the peer set: additions,
+removals, changed keys, endpoints and prefixes. A peer is identified by its
+static key rather than its position in the file, so a peer that is still
+present keeps its id and its established session.
+
+Refused rather than half-applied: the interface name, the listen port, the
+transport mode, and any FEC setting. Changing those means recreating the
+device or the socket, which drops every session — a restart by another name.
+
+A malformed file changes nothing: the whole configuration is decoded before
+anything is replaced.
+
+Verified: adding a peer to a live tunnel reports `reload: 2 peers` and the
+existing session continues at 0% packet loss; appending a broken key is
+refused and the tunnel is unharmed. `NORR_RELOAD=1 bash scripts/e2e_tunnel.sh`.
+
+Not covered: removing a peer stops new handshakes and drops its routes, but
+leaves an established session until it times out. Tearing it down inside the
+reload would drop packets already in flight.
+
 ## Limits follow WireGuard's timer state machine
 
 Norr uses the same profile as WireGuard, so it uses the same bounds rather than

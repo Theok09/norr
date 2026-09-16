@@ -68,6 +68,19 @@ const PeerConfig* ControlPlane::find_peer(PeerId peer) const noexcept {
   return entry == peers_.end() ? nullptr : &entry->second;
 }
 
+void ControlPlane::forget_peer(PeerId peer) {
+  peers_.erase(peer);
+  pending_.erase(peer);
+  greatest_timestamp_.erase(peer);
+  timers_->cancel(TimerKind::handshake_timeout, peer);
+  timers_->cancel(TimerKind::handshake_retry, peer);
+  timers_->cancel(TimerKind::rekey, peer);
+  timers_->cancel(TimerKind::keepalive, peer);
+
+  std::erase_if(provisional_, [&](const auto& entry) { return entry.second.peer == peer; });
+  std::erase(keepalive_due_, peer);
+}
+
 std::expected<OutgoingHandshake, ControlError> ControlPlane::build_initiation(Pending& entry,
                                                                               Instant now) {
   const auto* config = find_peer(entry.peer);

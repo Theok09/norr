@@ -85,6 +85,16 @@ class ControlPlane {
 
   [[nodiscard]] const PeerConfig* find_peer(PeerId peer) const noexcept;
 
+  // Forgets a peer's configuration and any half-open handshake for it.
+  //
+  // Established sessions are left alone: a reload that removed a peer from the
+  // configuration should stop new handshakes, and the datapath drops its
+  // traffic once the routes are gone, but tearing a live session down inside
+  // the reload would drop packets that are already in flight.
+  void forget_peer(PeerId peer);
+
+  [[nodiscard]] std::size_t peer_count() const noexcept { return peers_.size(); }
+
   [[nodiscard]] std::expected<OutgoingHandshake, ControlError> start_handshake(PeerId peer,
                                                                                Instant now);
 
