@@ -125,7 +125,7 @@ because a block size of 4 puts one parity packet on the wire for every four
 data packets, and at 20% loss the parity is lost as often as anything else.
 The mode names describe parity density, not outcome.
 
-## Multi-threaded datapath (removed)
+## Multi-threaded datapath (shared state now safe, still single-threaded)
 
 There was a `WorkerPool` that opened a multi-queue TUN and ran a `Worker` per
 thread. It was never wired into the runtime, and wiring it as written would
@@ -138,10 +138,27 @@ repeated counter under the same key is a repeated ChaCha20-Poly1305 nonce -
 which discloses the XOR of two plaintexts and forfeits authentication. The
 receive side has the same problem in the replay window.
 
-Making it safe means giving each thread its own sessions, not locking a shared
-table: a mutex on the datapath would cost more than the second core returns.
-That is a design change, so the code was deleted rather than left in the tree
-looking available. Throughput is one core's worth.
+Both halves are now fixed, and verified rather than assumed.
+
+`Session::seal` and `Session::open` take a per-session mutex, so the counter
+and the replay window stay consistent under concurrency while different peers
+proceed in parallel. `SessionTable` hands out `shared_ptr`, so a session erased
+during rekey outlives any worker still holding it. `RoutingTable` takes a
+shared mutex: readers classify in parallel and block only for the moment a
+reload rewrites the routes.
+
+`tests/concurrency_test.cpp` exercises all three under ThreadSanitizer, which
+`-DNORR_ENABLE_TSAN=ON` enables. It reports nothing across 2000 concurrent
+seals and 2.8 million classifications during 50 live reloads. Removing the
+session mutex makes it report the data race immediately, which is what says
+the clean run means something.
+
+The datapath is still single-threaded: nothing spawns workers. Each `Worker`
+owns its padding buffer, its encryption buffer and its FEC encoder, and the
+FEC block index is inherently sequential, so threading means one `Worker` per
+thread over a multi-queue TUN rather than several threads inside one. That
+work is not done. What has changed is that the shared state no longer makes it
+unsafe to attempt. Throughput today is one core's worth.
 
 ## Congestion control (wired)
 
