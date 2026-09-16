@@ -168,6 +168,8 @@ include(GNUInstallDirs)
 
 install(TARGETS norr RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+install(PROGRAMS scripts/norr-quick DESTINATION ${CMAKE_INSTALL_BINDIR})
+
 install(FILES deployment/norr.toml.example
         DESTINATION ${CMAKE_INSTALL_DOCDIR}
         RENAME norr.toml.example)

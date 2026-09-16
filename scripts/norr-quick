@@ -1,0 +1,164 @@
+#!/bin/sh
+# Bring a Norr interface up or down from its configuration file.
+#
+# Norr itself never configures addresses or routes: that needs privileges the
+# daemon gives up at startup, so the split is deliberate. This script is the
+# other half — it asks `norr interface` what the configuration implies, then
+# applies it with ip(8).
+#
+# Modelled on wg-quick(8), which does the same job for WireGuard.
+set -eu
+
+NORR="${NORR:-norr}"
+CONFIG_DIR="${NORR_CONFIG_DIR:-/etc/norr}"
+
+usage() {
+  echo "usage: norr-quick up|down|status <name|config>" >&2
+  exit 2
+}
+
+die() {
+  echo "norr-quick: $*" >&2
+  exit 1
+}
+
+# A bare name means /etc/norr/<name>.toml, the way wg-quick treats an
+# interface name. A path is used as given.
+resolve_config() {
+  case "$1" in
+    */*|*.toml) printf '%s' "$1" ;;
+    *)          printf '%s/%s.toml' "$CONFIG_DIR" "$1" ;;
+  esac
+}
+
+# The plan is whatever `norr interface` reports: one directive per line, so
+# this stays readable and the parsing cannot drift from the config format.
+read_plan() {
+  "$NORR" interface "$1" || die "cannot read $1"
+}
+
+plan_value() {
+  printf '%s\n' "$2" | awk -v key="$1" '$1 == key { print $2; exit }'
+}
+
+plan_values() {
+  printf '%s\n' "$2" | awk -v key="$1" '$1 == key { print $2 }'
+}
+
+cmd_up() {
+  config=$(resolve_config "$1")
+  [ -r "$config" ] || die "$config is not readable"
+
+  plan=$(read_plan "$config")
+  tun=$(plan_value tun "$plan")
+  [ -n "$tun" ] || die "no interface name in $config"
+
+  if ip link show "$tun" >/dev/null 2>&1; then
+    die "$tun already exists; run 'norr-quick down $1' first"
+  fi
+
+  # The daemon creates the device, so it starts before anything can be
+  # configured on it.
+  "$NORR" run "$config" &
+  daemon=$!
+
+  # Wait for the device rather than sleeping a fixed time: startup includes
+  # reading a key and binding a socket, and a fixed delay is either too short
+  # on a loaded machine or wasted on an idle one.
+  attempt=0
+  while [ "$attempt" -lt 100 ]; do
+    if ip link show "$tun" >/dev/null 2>&1; then break; fi
+    if ! kill -0 "$daemon" 2>/dev/null; then
+      wait "$daemon" 2>/dev/null || true
+      die "norr exited before creating $tun"
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
+  ip link show "$tun" >/dev/null 2>&1 || die "$tun did not appear"
+
+  mtu=$(plan_value mtu "$plan")
+  if [ -n "$mtu" ]; then
+    ip link set "$tun" mtu "$mtu"
+  fi
+
+  for address in $(plan_values address "$plan"); do
+    case "$address" in
+      *:*) ip -6 addr add "$address" dev "$tun" ;;
+      *)   ip addr add "$address" dev "$tun" ;;
+    esac
+  done
+
+  ip link set "$tun" up
+
+  # A peer's allowed_ips are its routes, exactly as in WireGuard's cryptokey
+  # routing: the same list that authorises a source is what directs traffic.
+  for route in $(plan_values route "$plan"); do
+    case "$route" in
+      *:*) ip -6 route add "$route" dev "$tun" 2>/dev/null || true ;;
+      *)   ip route add "$route" dev "$tun" 2>/dev/null || true ;;
+    esac
+  done
+
+  echo "$daemon" > "/run/norr-$tun.pid" 2>/dev/null || true
+  echo "$tun up"
+}
+
+cmd_down() {
+  config=$(resolve_config "$1")
+
+  if [ -r "$config" ]; then
+    tun=$(plan_value tun "$(read_plan "$config")")
+  else
+    tun="$1"
+  fi
+  [ -n "$tun" ] || die "no interface name"
+
+  pidfile="/run/norr-$tun.pid"
+  if [ -r "$pidfile" ]; then
+    pid=$(cat "$pidfile")
+    kill -TERM "$pid" 2>/dev/null || true
+    rm -f "$pidfile"
+  else
+    pkill -TERM -f "norr run .*$tun" 2>/dev/null || true
+  fi
+
+  # The daemon owns the device, so it disappears when the process does. The
+  # link is only removed explicitly if something left it behind.
+  attempt=0
+  while [ "$attempt" -lt 50 ]; do
+    ip link show "$tun" >/dev/null 2>&1 || break
+    attempt=$((attempt + 1))
+    sleep 0.1
+  done
+  ip link del "$tun" 2>/dev/null || true
+
+  echo "$tun down"
+}
+
+cmd_status() {
+  config=$(resolve_config "$1")
+  if [ -r "$config" ]; then
+    tun=$(plan_value tun "$(read_plan "$config")")
+  else
+    tun="$1"
+  fi
+
+  if ip link show "$tun" >/dev/null 2>&1; then
+    ip -brief addr show "$tun"
+    ip route show dev "$tun"
+  else
+    echo "$tun is down"
+    exit 1
+  fi
+}
+
+[ $# -eq 2 ] || usage
+[ "$(id -u)" -eq 0 ] || die "must run as root"
+
+case "$1" in
+  up)     cmd_up "$2" ;;
+  down)   cmd_down "$2" ;;
+  status) cmd_status "$2" ;;
+  *)      usage ;;
+esac
