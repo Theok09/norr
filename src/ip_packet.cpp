@@ -59,6 +59,25 @@ namespace {
 
 }
 
+std::optional<std::size_t> declared_ip_length(std::span<const std::byte> bytes) noexcept {
+  if (bytes.empty()) return std::nullopt;
+  const auto version = static_cast<std::uint8_t>(bytes[0]) >> 4U;
+
+  if (version == 4) {
+    if (bytes.size() < kIpv4HeaderSize) return std::nullopt;
+    const auto total = static_cast<std::size_t>(read_u16(bytes, 2));
+    if (total < kIpv4HeaderSize) return std::nullopt;
+    return total;
+  }
+
+  if (version == 6) {
+    if (bytes.size() < kIpv6HeaderSize) return std::nullopt;
+    return kIpv6HeaderSize + static_cast<std::size_t>(read_u16(bytes, 4));
+  }
+
+  return std::nullopt;
+}
+
 std::expected<IpPacketView, Error> parse_ip_packet(std::span<const std::byte> bytes) noexcept {
   if (bytes.empty()) return std::unexpected(Error::malformed_packet);
 

@@ -151,6 +151,27 @@ keepalive is a sealed frame with a header and a tag — so this is not reachable
 and the test documents it rather than asserting behaviour the library does not
 have.
 
+## Traffic-analysis padding (fixed)
+
+Norr sent each inner packet at its exact size, so the ciphertext length equalled
+the plaintext length and an observer could read the size of every packet the
+tunnel carried. WireGuard pads each inner plaintext to a multiple of 16 before
+encryption for this reason; Norr now does the same.
+
+No length field was added to undo it. An IP header carries its own total
+length, so the receiver reads that and trims the rest. `declared_ip_length`
+exists for exactly that step, because `parse_ip_packet` requires the declared
+length to match the buffer exactly and a padded buffer never does.
+
+Cost is at most 15 bytes per packet. Verified: two inner packets of different
+sizes that fall in the same 16-byte block produce ciphertext of identical
+length.
+
+Not addressed: the padding is deterministic, so the *set* of possible sizes is
+still 16-byte quantised and timing is untouched. Defeating a serious traffic
+analyst needs random padding and cover traffic, which is a larger design
+question than alignment.
+
 ## Limits follow WireGuard's timer state machine
 
 Norr uses the same profile as WireGuard, so it uses the same bounds rather than

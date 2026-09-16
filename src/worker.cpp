@@ -10,7 +10,9 @@ Worker::Worker(TunDevice& tun, Carrier& carrier, RoutingTable& routes,
       routes_(&routes),
       sessions_(&sessions),
       tun_read_buffer_(kFrameBufferSize),
-      encrypt_buffer_(kFrameBufferSize + kPacketHeaderSize + kAeadTagSize),
+      encrypt_buffer_(kFrameBufferSize + kPacketHeaderSize + kAeadTagSize +
+                      kPaddingAlignment),
+      pad_buffer_(kFrameBufferSize + kPaddingAlignment),
       decrypt_buffer_(kFrameBufferSize),
       receive_pool_(UdpTransport::kDefaultBatchSize, UdpTransport::kDefaultDatagramSize),
       inbound_(UdpTransport::kDefaultBatchSize) {}
@@ -59,7 +61,23 @@ DropReason Worker::forward_from_tun(std::span<const std::byte> frame) {
     return DropReason::no_endpoint;
   }
 
-  const auto sealed = session->seal(FrameType::data, frame, encrypt_buffer_);
+  // Pad the inner packet to a multiple of 16 before sealing, as WireGuard
+  // does. Without it the ciphertext length is exactly the inner packet length,
+  // so an observer reads the size of every packet the tunnel carries.
+  //
+  // No length field is needed to undo it: an IP header carries its own total
+  // length, so the receiver takes that and ignores the rest.
+  const auto padded = padded_length(frame.size());
+  if (padded > pad_buffer_.size()) {
+    stats_.record_drop(DropReason::oversized);
+    return DropReason::oversized;
+  }
+  std::copy(frame.begin(), frame.end(), pad_buffer_.begin());
+  std::fill(pad_buffer_.begin() + static_cast<std::ptrdiff_t>(frame.size()),
+            pad_buffer_.begin() + static_cast<std::ptrdiff_t>(padded), std::byte{0});
+
+  const auto sealed =
+      session->seal(FrameType::data, std::span{pad_buffer_}.first(padded), encrypt_buffer_);
   if (!sealed) {
     const auto reason = sealed.error() == SessionError::counter_exhausted
                             ? DropReason::counter_exhausted
@@ -184,7 +202,18 @@ DropReason Worker::forward_from_transport(const Endpoint& source,
     return DropReason::none;
   }
 
-  const auto plaintext = std::span{decrypt_buffer_}.first(plaintext_length);
+  // The sender padded to a 16-byte boundary, so the buffer is at least as long
+  // as the packet and usually longer. `parse_ip_packet` requires the declared
+  // length to match the span exactly, so the padding is removed first: the
+  // length is read from the header, then the span is trimmed to it.
+  const auto padded_plaintext = std::span{decrypt_buffer_}.first(plaintext_length);
+  const auto declared = declared_ip_length(padded_plaintext);
+  if (!declared || *declared > plaintext_length) {
+    stats_.record_drop(DropReason::malformed_inner_packet);
+    return DropReason::malformed_inner_packet;
+  }
+  const auto plaintext = padded_plaintext.first(*declared);
+
   const auto parsed = parse_ip_packet(plaintext);
   if (!parsed) {
     stats_.record_drop(DropReason::malformed_inner_packet);
