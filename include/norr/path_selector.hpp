@@ -68,6 +68,13 @@ class Path {
 
   [[nodiscard]] double score() const noexcept { return score_; }
 
+  // Records that this path stopped working, for a path that is no longer
+  // sampled because it is no longer the active one.
+  void mark_failed() noexcept {
+    state_ = PathState::failed;
+    good_ = 0;
+  }
+
   [[nodiscard]] std::uint32_t consecutive_good() const noexcept { return good_; }
   [[nodiscard]] std::uint32_t consecutive_bad() const noexcept { return bad_; }
 
@@ -94,6 +101,11 @@ class PathSelector {
   explicit PathSelector(PathThresholds thresholds = {}) noexcept : thresholds_(thresholds) {}
 
   void add_path(TransportKind kind);
+
+  // Names the path that is actually carrying traffic. add_path adopts the
+  // first path added, which is not necessarily the carrier the runtime
+  // installed.
+  void set_active(TransportKind kind);
 
   void observe(TransportKind kind, const PathSample& sample);
 

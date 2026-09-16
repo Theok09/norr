@@ -145,10 +145,12 @@ DropReason Worker::forward_from_tun(std::span<const std::byte> frame) {
       OutboundDatagram{.destination = *session->endpoint(), .payload = wire}};
   const auto sent = transport_->send_batch(datagram);
   if (!sent || *sent == 0) {
+    bytes_dropped_ += wire.size();
     stats_.record_drop(DropReason::send_failed);
     return DropReason::send_failed;
   }
 
+  bytes_sent_ += wire.size();
   ++stats_.tun_to_udp;
   return DropReason::none;
 }
@@ -291,6 +293,20 @@ DropReason Worker::forward_sealed(const Endpoint& source, std::span<const std::b
 
   if (view->header.type == FrameType::control) {
     ++stats_.keepalives_received;
+
+    // An empty control frame is a plain keepalive. One with a payload is an
+    // echo: the first byte says whether it is a request to be sent back or a
+    // reply to one we sent. Both are inside the AEAD, so a forged echo cannot
+    // move our RTT estimate.
+    const auto payload = std::span{decrypt_buffer_}.first(plaintext_length);
+    if (payload.size() > 1 && ingress_peer != kNoPeer) {
+      const auto token = payload.subspan(1);
+      if (payload[0] == kEchoRequest && echo_responder_) {
+        echo_responder_(ingress_peer, token);
+      } else if (payload[0] == kEchoReply && echo_reply_handler_) {
+        echo_reply_handler_(ingress_peer, token);
+      }
+    }
     return DropReason::none;
   }
 

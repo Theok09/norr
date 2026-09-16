@@ -1,4 +1,5 @@
 #include <csignal>
+#include <chrono>
 #include <cstdio>
 #include <string>
 #include <string_view>
@@ -128,6 +129,21 @@ int run(const std::string& path) {
               static_cast<unsigned long long>(control.handshakes_started),
               static_cast<unsigned long long>(control.handshakes_completed),
               static_cast<unsigned long long>(control.handshakes_failed));
+
+  if (runtime.measured_rtt().count() > 0) {
+    std::printf("rtt %.1f ms\n",
+                std::chrono::duration<double, std::milli>(runtime.measured_rtt()).count());
+  }
+
+  if (runtime.congestion_active()) {
+    const auto& cc = runtime.congestion_stats();
+    std::printf("congestion rate %.0f B/s  samples %llu  probes %llu  backoff delay %llu loss %llu\n",
+                runtime.pacing_rate(),
+                static_cast<unsigned long long>(cc.samples),
+                static_cast<unsigned long long>(cc.probes),
+                static_cast<unsigned long long>(cc.delay_backoffs),
+                static_cast<unsigned long long>(cc.loss_backoffs));
+  }
 
   if (runtime.fec_mode() != norr::FecMode::off) {
     const auto& encode = runtime.fec_encode_stats();

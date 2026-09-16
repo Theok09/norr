@@ -257,28 +257,54 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
   // be moved off it.
   if (config.transport == TransportMode::automatic && peer_count_ == 1) {
     const auto* partner = control_->find_peer(1);
-    if (partner != nullptr && partner->endpoint.has_value() && tls_available()) {
-      tcp_carrier_ = std::make_unique<TcpCarrier>(tcp_, *partner->endpoint, true,
-                                                  partner->preshared);
+
+    // A connection-oriented carrier needs one side to dial and the other to
+    // answer. Both sides of an automatic pair usually know each other's
+    // endpoint, so the endpoint cannot decide which is which - the role does.
+    // Without this both nodes dial and neither listens, and the fallback
+    // carriers never connect at all.
+    const bool dials = config.role == NodeRole::client;
+    const auto far = partner != nullptr && partner->endpoint.has_value()
+                         ? *partner->endpoint
+                         : Endpoint{};
+
+    if (partner != nullptr && tls_available()) {
+      if (!dials) {
+        if (const auto listening = tcp_listener_.listen(*bind_address); !listening) {
+          return std::unexpected(
+              Diagnostic{RuntimeError::bind_failed,
+                         std::string{transport_error_message(listening.error())}});
+        }
+      }
+      tcp_carrier_ = std::make_unique<TcpCarrier>(tcp_, far, dials, partner->preshared);
       paths_.add_path(TransportKind::tcp_tls);
     }
-    if (partner != nullptr && partner->endpoint.has_value() && quic_available()) {
+    if (partner != nullptr && quic_available()) {
       auto connection = make_quic_connection();
       if (connection) {
         quic_ = std::move(*connection);
-        quic_carrier_ = std::make_unique<QuicCarrier>(*quic_, transport_, *partner->endpoint,
-                                                      *bind_address, false);
+        quic_carrier_ = std::make_unique<QuicCarrier>(*quic_, transport_, far,
+                                                      *bind_address, !dials);
         paths_.add_path(TransportKind::quic);
       }
     }
     if (tcp_carrier_ != nullptr || quic_carrier_ != nullptr) {
       paths_.add_path(TransportKind::udp);
+      // add_path makes the first path added the active one, and the fallbacks
+      // were added first. The selector has to agree with the carrier actually
+      // installed or its very first evaluation reads the wrong path's health.
+      paths_.set_active(TransportKind::udp);
       automatic_fallback_ = true;
       last_path_check_ = std::chrono::steady_clock::now();
     }
   }
 
   worker_ = std::make_unique<Worker>(tun_, *carrier_, routes_, sessions_);
+
+  worker_->set_echo_responder(
+      [this](PeerId peer, std::span<const std::byte> token) { answer_echo(peer, token); });
+  worker_->set_echo_reply_handler(
+      [this](PeerId peer, std::span<const std::byte> token) { note_echo_reply(peer, token); });
 
   if (config.fec != FecMode::off) {
     worker_->enable_fec(config.fec);
@@ -287,6 +313,14 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
   if (config.qos_enabled) {
     worker_->enable_queueing(static_cast<double>(config.qos_rate_bytes),
                              config.qos_burst_bytes, std::chrono::steady_clock::now());
+
+    // The configured rate is the ceiling an operator asked for, and the
+    // starting point. Congestion control moves the actual rate below it when
+    // the path says so, and never above it.
+    CongestionConfig tuning{};
+    tuning.maximum_rate_bytes = static_cast<double>(config.qos_rate_bytes);
+    congestion_ = CongestionController{tuning, static_cast<double>(config.qos_rate_bytes)};
+    congestion_enabled_ = true;
   }
 
   if (config.metrics_enabled) {
@@ -447,18 +481,66 @@ void Runtime::send_outgoing(const OutgoingHandshake& outgoing) {
   static_cast<void>(carrier_->send_batch(batch));
 }
 
-void Runtime::send_keepalive(PeerId peer) {
+void Runtime::send_control(PeerId peer, std::span<const std::byte> payload) {
   auto* session = sessions_.find_by_peer(peer);
   if (session == nullptr || !session->endpoint().has_value()) return;
 
-  std::array<std::byte, kPacketHeaderSize + kAeadTagSize> frame{};
-  const auto sealed = session->seal(FrameType::control, {}, frame);
+  std::array<std::byte, kPacketHeaderSize + 1 + kEchoTokenSize + kAeadTagSize> frame{};
+  const auto sealed = session->seal(FrameType::control, payload, frame);
   if (!sealed) return;
 
   const OutboundDatagram datagram{.destination = *session->endpoint(),
                                   .payload = std::span{frame}.first(*sealed)};
   const std::array<OutboundDatagram, 1> batch{datagram};
   static_cast<void>(carrier_->send_batch(batch));
+}
+
+void Runtime::send_keepalive(PeerId peer) {
+  // The keepalive doubles as an echo request. A separate probe would be one
+  // more thing on the wire measuring itself; this measures the path that
+  // traffic actually takes, on a packet that was being sent anyway.
+  const auto now = std::chrono::steady_clock::now();
+  const auto stamp = static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count());
+
+  std::array<std::byte, 1 + kEchoTokenSize> payload{};
+  payload[0] = kEchoRequest;
+  for (std::size_t index = 0; index < kEchoTokenSize; ++index) {
+    payload[1 + index] = static_cast<std::byte>((stamp >> (8 * (7 - index))) & 0xFFU);
+  }
+
+  send_control(peer, payload);
+}
+
+void Runtime::answer_echo(PeerId peer, std::span<const std::byte> token) {
+  if (token.size() != kEchoTokenSize) return;
+
+  std::array<std::byte, 1 + kEchoTokenSize> payload{};
+  payload[0] = kEchoReply;
+  std::copy(token.begin(), token.end(), payload.begin() + 1);
+  send_control(peer, payload);
+}
+
+void Runtime::note_echo_reply(PeerId peer, std::span<const std::byte> token) {
+  if (token.size() != kEchoTokenSize) return;
+
+  std::uint64_t stamp = 0;
+  for (const auto byte : token) {
+    stamp = (stamp << 8) | static_cast<std::uint64_t>(byte);
+  }
+
+  const auto now = std::chrono::steady_clock::now();
+  const auto sent_at = std::chrono::microseconds{stamp};
+  const auto elapsed =
+      std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()) - sent_at;
+
+  // A token that did not come from this process, or one from before a clock
+  // adjustment, would read as a nonsensical round trip. Those are dropped
+  // rather than smeared into the estimate.
+  if (elapsed.count() <= 0 || elapsed > kMaximumPlausibleRtt) return;
+
+  last_rtt_ = elapsed;
+  static_cast<void>(peer);
 }
 
 void Runtime::service_tcp_carrier(Instant now) {
@@ -506,10 +588,60 @@ void Runtime::service_quic_carrier() {
   }
 }
 
+void Runtime::apply_congestion_control(Instant now) {
+  // Congestion control only has anything to act on when the datapath is
+  // shaping. Without a queue there is no rate to lower and nothing to pace.
+  if (!congestion_enabled_ || worker_ == nullptr || !worker_->queueing_enabled()) return;
+  if (now - last_congestion_sample_ < kCongestionSampleInterval) return;
+
+  // A round trip is the input the controller cannot do without: it separates
+  // a queue that is filling from a path that is merely busy. Until the first
+  // echo completes there is nothing honest to feed it.
+  if (last_rtt_.count() <= 0) return;
+
+  const auto interval = last_congestion_sample_ == Instant{}
+                            ? kCongestionSampleInterval
+                            : now - last_congestion_sample_;
+  last_congestion_sample_ = now;
+
+  const auto sent = worker_->bytes_sent();
+  const auto dropped = worker_->bytes_dropped();
+  const DeliverySample sample{
+      .rtt = last_rtt_,
+      .bytes_delivered = sent > last_bytes_sent_ ? sent - last_bytes_sent_ : 0,
+      .bytes_lost = dropped > last_bytes_dropped_ ? dropped - last_bytes_dropped_ : 0,
+      .interval = interval};
+  last_bytes_sent_ = sent;
+  last_bytes_dropped_ = dropped;
+
+  congestion_.observe(sample, now);
+  worker_->set_pacing_rate(congestion_.rate_bytes_per_second());
+}
+
 void Runtime::evaluate_transport_paths(Instant now) {
   if (!automatic_fallback_) return;
-  if (now - last_path_check_ < kKeepaliveInterval) return;
+
+  // A carrier that was just selected has not had time to connect: TCP has a
+  // handshake and so does TLS, and QUIC has both. Judging it before it can
+  // finish means abandoning it mid-handshake and moving to the next one, which
+  // never settles anywhere. Nothing is evaluated during that window.
+  if (switched_at_ != Instant{} && now - switched_at_ < kTransportSettleTime) return;
+
+  if (now - last_path_check_ < kTransportCheckInterval) return;
   last_path_check_ = now;
+
+  // A connection-oriented carrier that has not finished connecting is not
+  // failing. TCP is still in connect or TLS, QUIC still in its handshake, and
+  // neither can carry a Noise handshake yet. Judging them here would abandon
+  // each one while it was still coming up.
+  if (active_kind_ == TransportKind::tcp_tls && tcp_carrier_ != nullptr &&
+      !tcp_carrier_->ready()) {
+    return;
+  }
+  if (active_kind_ == TransportKind::quic && quic_carrier_ != nullptr &&
+      !quic_carrier_->ready()) {
+    return;
+  }
 
   // Health comes from what the datapath already observes: whether a session is
   // still hearing from its peer, and whether the carrier is failing to send.
@@ -523,23 +655,40 @@ void Runtime::evaluate_transport_paths(Instant now) {
   for (PeerId peer = 1; peer <= peer_count_; ++peer) {
     auto* session = sessions_.find_by_peer(peer);
     if (session == nullptr || !session->has_received()) continue;
-    if (now - session->last_received() < kDeadPeerTimeout) {
+    if (now - session->last_received() < kTransportSilenceTimeout) {
       hearing = true;
       break;
     }
   }
 
-  // A handshake that was started but never completed is the other failure
-  // signal: on a blocked path the initiator retries and nothing comes back.
-  // Relying on a live session alone would miss it, because dead-peer detection
-  // removes the session first and leaves nothing to observe.
+  // Retries are the other failure signal. A started handshake that never
+  // completes looks identical to one still in flight, and dead-peer detection
+  // removes the session before the started/completed gap ever opens - so the
+  // count of retransmitted initiations is what actually distinguishes a
+  // blocked path from an idle one.
   const auto& control = control_->stats();
   const auto attempted = control.handshakes_started;
-  const auto completed = control.handshakes_completed;
-  const auto stalled = attempted > completed;
+  const auto retries = control.retries;
+  const auto new_retries = retries > last_retries_ ? retries - last_retries_ : 0;
+  last_retries_ = retries;
+  const auto stalled = new_retries > 0;
 
-  const auto working = hearing && !stalled;
-  const PathSample sample{.rtt_microseconds = 0.0,
+  // Silence on its own is not failure: a tunnel with nothing to carry is
+  // quiet, and condemning it would move a perfectly good carrier. A path is
+  // judged broken only when something is actively failing on it - initiations
+  // being retransmitted, or the carrier refusing to send. This is what keeps
+  // an idle spoke from falling back off a working UDP path.
+  const auto failing = stalled || new_errors > 0;
+  const auto working = !failing;
+  if (!failing && !hearing) return;
+  // A path with no completed echo yet reports zero, which the thresholds treat
+  // as the best possible RTT. That is the right reading for a path that has
+  // not been measured: it is judged on whether it is carrying traffic, not on
+  // a latency nobody has observed.
+  const auto rtt_microseconds = static_cast<double>(
+      std::chrono::duration_cast<std::chrono::microseconds>(last_rtt_).count());
+
+  const PathSample sample{.rtt_microseconds = rtt_microseconds,
                           .loss_fraction = working ? 0.0 : 1.0,
                           .transport_errors = new_errors,
                           .reachable = working};
@@ -547,7 +696,7 @@ void Runtime::evaluate_transport_paths(Instant now) {
 
   // Nothing has been tried yet: a carrier with no traffic at all is not
   // failing, it is idle.
-  if (attempted == 0 && new_errors == 0) return;
+  if (attempted == 0 && new_errors == 0 && new_retries == 0) return;
   if (working && new_errors == 0) return;
 
   if (!paths_.evaluate(now)) return;
@@ -567,9 +716,14 @@ void Runtime::evaluate_transport_paths(Instant now) {
   active_kind_ = chosen;
   worker_->set_carrier(*next);
   last_tx_errors_ = 0;
+  last_retries_ = control_->stats().retries;
+  switched_at_ = now;
 
   std::fprintf(stderr, "transport: switched to %s\n",
                std::string{transport_kind_name(chosen)}.c_str());
+  // A fallback is the one event an operator is watching for, and stderr to a
+  // file is block buffered: without this it is not visible until exit.
+  std::fflush(stderr);
 
   // The peer is reached over a different carrier now, so the session it had is
   // useless: a new handshake establishes one over the path that works.
@@ -650,6 +804,7 @@ void Runtime::run() {
     redial_dead_peers(now);
     service_tcp_carrier(now);
     service_quic_carrier();
+    apply_congestion_control(now);
     evaluate_transport_paths(now);
 
     if (reload_requested_.exchange(false, std::memory_order_relaxed)) {

@@ -21,6 +21,13 @@ class Pacer {
   [[nodiscard]] bool enabled() const noexcept { return enabled_; }
 
   [[nodiscard]] double rate_bytes_per_second() const noexcept { return rate_; }
+
+  // Congestion control moves this while the tunnel runs. The accumulated
+  // allowance is left alone: it was earned under the old rate and discarding
+  // it would stall the queue for a full burst.
+  void set_rate_bytes_per_second(double rate) noexcept {
+    if (rate > 0.0) rate_ = rate;
+  }
   [[nodiscard]] std::uint64_t paced_bytes() const noexcept { return paced_bytes_; }
   [[nodiscard]] std::uint64_t deferred() const noexcept { return deferred_; }
 
