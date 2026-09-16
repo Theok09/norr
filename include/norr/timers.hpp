@@ -44,6 +44,10 @@ inline constexpr auto kKeepaliveInterval = std::chrono::seconds{25};
 inline constexpr auto kDeadPeerTimeout = std::chrono::seconds{90};
 inline constexpr auto kRekeyAfter = std::chrono::minutes{2};
 inline constexpr auto kSessionExpiry = std::chrono::minutes{3};
+
+inline constexpr std::uint64_t kRekeyAfterMessages = 1ULL << 60U;
+
+inline constexpr std::uint64_t kRejectAfterMessages = UINT64_MAX - (1ULL << 13U);
 inline constexpr auto kRetireAfter = std::chrono::seconds{10};
 
 [[nodiscard]] Duration retry_backoff(std::uint32_t attempt) noexcept;

@@ -92,6 +92,16 @@ class Session {
 
   [[nodiscard]] bool has_received() const noexcept { return stats_.received > 0; }
 
+  [[nodiscard]] Instant established_at() const noexcept { return established_at_; }
+
+  [[nodiscard]] bool needs_rekey(Instant now) const noexcept {
+    return stats_.sent >= kRekeyAfterMessages || now - established_at_ >= kRekeyAfter;
+  }
+
+  [[nodiscard]] bool expired(Instant now) const noexcept {
+    return stats_.sent >= kRejectAfterMessages || now - established_at_ >= kSessionExpiry;
+  }
+
  private:
   PeerId peer_{kNoPeer};
   std::uint16_t local_key_id_{};
@@ -102,6 +112,7 @@ class Session {
   ReplayWindow replay_;
   std::optional<Endpoint> endpoint_;
   Instant last_received_{};
+  Instant established_at_{std::chrono::steady_clock::now()};
   SessionStats stats_{};
 };
 

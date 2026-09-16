@@ -387,6 +387,26 @@ void test_remove_does_not_disturb_the_active_mapping() {
   std::puts("session: removing a retired key leaves the active session OK");
 }
 
+// WireGuard's timer state machine bounds a session by messages as well as by
+// time: REKEY_AFTER_MESSAGES at 2^60 and REJECT_AFTER_MESSAGES at
+// 2^64 - 2^13 - 1. Norr uses the same values, because the reason is the same:
+// a counter that reaches its maximum would repeat a nonce under one key.
+void test_message_and_time_limits_match_the_reference() {
+  NORR_CHECK(norr::kRekeyAfterMessages == (1ULL << 60U));
+  NORR_CHECK(norr::kRejectAfterMessages == 18'446'744'073'709'543'423ULL);
+
+  // Rekey must come first, or a session would be refused before it was ever
+  // replaced.
+  NORR_CHECK(norr::kRekeyAfterMessages < norr::kRejectAfterMessages);
+  NORR_CHECK(norr::kRekeyAfter < norr::kSessionExpiry);
+
+  // The reject ceiling must stay below the counter's own maximum so the
+  // session is retired before the nonce space runs out.
+  NORR_CHECK(norr::kRejectAfterMessages < UINT64_MAX);
+
+  std::puts("session: message and time limits match the reference OK");
+}
+
 int main() {
   if (norr::crypto_available()) {
     NORR_CHECK(norr::crypto_init().has_value());
@@ -403,6 +423,7 @@ int main() {
   test_out_of_order_within_window();
   test_buffer_bounds();
   test_endpoint_tracking();
+  test_message_and_time_limits_match_the_reference();
   test_rekey_retains_the_previous_session();
   test_remove_does_not_disturb_the_active_mapping();
 #else

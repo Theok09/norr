@@ -17,6 +17,10 @@ std::expected<std::size_t, SessionError> Session::seal(FrameType type,
   const auto required = kPacketHeaderSize + plaintext.size() + kAeadTagSize;
   if (out.size() < required) return std::unexpected(SessionError::buffer_too_small);
 
+  if (stats_.sent >= kRejectAfterMessages) {
+    return std::unexpected(SessionError::counter_exhausted);
+  }
+
   const auto counter = send_counter_.next();
   if (!counter) return std::unexpected(SessionError::counter_exhausted);
 
