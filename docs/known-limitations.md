@@ -100,13 +100,39 @@ given and never probed or adjusted.
 
 ## Timers that are defined but never armed
 
-`session_expiry` and `path_probe` exist in `TimerKind` and are handled as
-no-ops. Nothing schedules them, so they cannot fire.
+`path_probe` exists in `TimerKind` and is handled as a no-op. Nothing schedules
+it, so it cannot fire.
 
-`dead_peer` is no longer among them in effect: liveness is now checked by the
-runtime sweep described under "Peer restart", which uses `kDeadPeerTimeout`
-directly rather than a scheduled timer. The `TimerKind` entry itself remains
-unused.
+`dead_peer` and `session_expiry` are both enforced now, but by the runtime
+liveness sweep rather than by scheduled timers: the sweep drops a session that
+has been silent past `kDeadPeerTimeout` or that has exceeded either
+`kSessionExpiry` or `kRejectAfterMessages`, then re-handshakes. The `TimerKind`
+entries themselves remain unused.
+
+## Limits follow WireGuard's timer state machine
+
+Norr uses the same profile as WireGuard, so it uses the same bounds rather than
+inventing its own:
+
+| | WireGuard | Norr |
+|---|---|---|
+| REKEY_AFTER_MESSAGES | 2^60 | `kRekeyAfterMessages` |
+| REJECT_AFTER_MESSAGES | 2^64 - 2^13 - 1 | `kRejectAfterMessages` |
+| REKEY_AFTER_TIME | 120s | `kRekeyAfter` |
+| REJECT_AFTER_TIME | 180s | `kSessionExpiry` |
+| REKEY_TIMEOUT | 5s | `kHandshakeTimeout` |
+| KEEPALIVE_TIMEOUT | 10s | `kKeepaliveInterval` is 25s |
+
+Two deliberate differences. Norr's keepalive is 25s rather than 10s, chosen to
+sit inside the shortest common NAT mapping timeout without generating traffic
+every ten seconds. Norr has no equivalent of REKEY_ATTEMPT_TIME; a handshake
+retries with bounded backoff up to `kHandshakeRetryMax` instead of giving up
+after a fixed window.
+
+The message bounds exist because the nonce is a counter: reaching its maximum
+would repeat a nonce under one key, which is the failure the Noise
+specification warns about. `Session::seal` refuses past
+`kRejectAfterMessages`, well before the counter itself runs out.
 
 ## Not field-validated
 

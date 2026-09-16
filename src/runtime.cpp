@@ -268,8 +268,10 @@ void Runtime::redial_dead_peers(Instant now) {
 
     auto* session = sessions_.find_by_peer(peer);
     if (session == nullptr) continue;
-    if (!session->has_received()) continue;
-    if (now - session->last_received() < kDeadPeerTimeout) continue;
+
+    const auto silent = session->has_received() &&
+                        now - session->last_received() >= kDeadPeerTimeout;
+    if (!silent && !session->expired(now)) continue;
 
     sessions_.remove(session->local_key_id());
     timers_.cancel(TimerKind::rekey, peer);
