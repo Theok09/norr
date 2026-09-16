@@ -84,6 +84,31 @@ std::expected<std::size_t, TransportError> TcpCarrier::receive_batch(
   return *received;
 }
 
+void QuicCarrier::flush() {
+  auto* ngtcp2 = dynamic_cast<Ngtcp2Connection*>(connection_);
+  if (ngtcp2 == nullptr) return;
+
+  while (true) {
+    const auto pending = ngtcp2->next_outgoing();
+    if (pending.empty()) break;
+    const std::array<OutboundDatagram, 1> wire{OutboundDatagram{peer_, pending}};
+    if (!socket_->send_batch(wire)) break;
+  }
+}
+
+void QuicCarrier::poll() {
+  if (connection_->established()) return;
+
+  // The dialing side starts the handshake once; the listening side has nothing
+  // to do until an Initial arrives, which receive_batch handles.
+  if (!listening_ && !dialed_) {
+    dialed_ = true;
+    if (!connection_->connect(peer_)) return;
+  }
+
+  flush();
+}
+
 std::expected<std::size_t, TransportError> QuicCarrier::send_batch(
     std::span<const OutboundDatagram> datagrams) {
   if (!connection_->established()) return std::unexpected(TransportError::send_failed);
@@ -127,15 +152,27 @@ std::expected<std::size_t, TransportError> QuicCarrier::receive_batch(
   if (ngtcp2 == nullptr) return received;
 
   for (std::size_t index = 0; index < *received; ++index) {
+    // The listening side has no connection until the first Initial arrives.
+    // Accepting it here is what makes a QUIC server possible without a
+    // separate listener socket: ngtcp2 needs the datagram, not a socket.
+    if (listening_ && !accepted_) {
+      const std::vector<std::byte> initial(out[index].payload.begin(),
+                                           out[index].payload.end());
+      if (ngtcp2->accept(local_, out[index].source, initial)) {
+        accepted_ = true;
+        peer_ = out[index].source;
+        ++stats_.rx_packets;
+        continue;
+      }
+      // Not a valid Initial. Dropped rather than fed to a connection that does
+      // not exist yet.
+      ++stats_.rx_errors;
+      continue;
+    }
     static_cast<void>(ngtcp2->feed(out[index].payload));
   }
 
-  while (true) {
-    const auto pending = ngtcp2->next_outgoing();
-    if (pending.empty()) break;
-    const std::array<OutboundDatagram, 1> wire{OutboundDatagram{peer_, pending}};
-    if (!socket_->send_batch(wire)) break;
-  }
+  flush();
 
   inbox_.resize(out.size());
   const auto count = connection_->receive_datagrams(inbox_);

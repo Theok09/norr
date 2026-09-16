@@ -115,6 +115,10 @@ class Runtime {
   // TLS handshake. A no-op unless the TCP carrier is the active one.
   void service_tcp_carrier(Instant now);
 
+  // Drives the QUIC handshake and dials the Noise handshake once it is up.
+  // A no-op unless the QUIC carrier is the active one.
+  void service_quic_carrier();
+
   [[nodiscard]] bool dispatch_control(const Endpoint& source,
                                       std::span<const std::byte> datagram);
 
@@ -126,6 +130,7 @@ class Runtime {
   SessionTable sessions_;
   TimerWheel timers_;
   std::unique_ptr<Carrier> carrier_;
+  std::unique_ptr<QuicConnection> quic_;
   TcpTransport tcp_;
   TcpListener tcp_listener_;
   std::unique_ptr<ControlPlane> control_;
@@ -139,6 +144,7 @@ class Runtime {
   bool handled_control_{};
   std::atomic<bool> reload_requested_{false};
   bool tcp_ready_{};
+  bool quic_ready_{};
   std::string config_path_;
   std::uint16_t listen_port_{};
   Instant last_liveness_sweep_{};

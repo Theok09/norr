@@ -44,18 +44,24 @@ Still true: only a peer with a configured `endpoint` can re-initiate. A
 listen-only node cannot dial back, so a restart on that side is recovered by
 the peer that dials, not by itself.
 
-## QUIC is not a working tunnel carrier
+## QUIC carrier (working)
 
-Observed: `transport.mode = "quic"` is refused at startup.
+`transport.mode = "quic"` now carries a tunnel. Norr's own handshake rides
+inside DATAGRAM frames rather than beside them on the socket, so the two
+protocols never contend for it — the collision that made this unusable is gone.
 
-The QUIC implementation itself works: `norr_quic_transport_tests` drives a full
-client-server handshake and a DATAGRAM round-trip against ngtcp2. What is
-missing is the integration. Norr's own Noise handshake is still sent on the raw
-UDP socket that the QUIC connection owns, so the two protocols would collide,
-and there is no QUIC listener, so a peer could not answer a dial.
+The listening side needs no separate socket: `Ngtcp2Connection::accept` takes
+the first Initial as a datagram, so the carrier accepts it from the shared
+socket and answers. The Noise handshake waits for the QUIC handshake to finish
+rather than being dialled into a connection that does not exist yet.
 
-Needed: a QUIC listener, and the Noise handshake carried inside QUIC DATAGRAM
-rather than beside it.
+Verified end to end: ICMP inside QUIC DATAGRAM at 0% loss, both sides reporting
+a completed handshake. `scripts/e2e_quic.sh`.
+
+Limits by design: QUIC carries a connection between two endpoints, so the
+carrier serves one peer. A configuration with more than one peer and
+`transport.mode = "quic"` is refused rather than silently carrying only the
+first.
 
 ## TCP carrier (working)
 
