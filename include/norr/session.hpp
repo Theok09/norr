@@ -1,8 +1,12 @@
+// Norr — encrypted layer 3 tunnel. Copyright (C) 2026 Theok09.
+// Licensed under the GNU AGPL v3 or later. See LICENSE.
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string_view>
 #include <unordered_map>
@@ -114,6 +118,8 @@ class Session {
   Instant last_received_{};
   Instant established_at_{std::chrono::steady_clock::now()};
   SessionStats stats_{};
+
+  std::unique_ptr<std::mutex> guard_{std::make_unique<std::mutex>()};
 };
 
 class SessionTable {
@@ -123,23 +129,28 @@ class SessionTable {
 
   [[nodiscard]] std::expected<std::uint16_t, SessionError> allocate_key_id();
 
-  [[nodiscard]] std::expected<Session*, SessionError> install(PeerId peer,
-                                                              std::uint16_t local_key_id,
-                                                              std::uint16_t remote_key_id,
-                                                              TrafficKeys send_keys,
-                                                              TrafficKeys receive_keys);
+  [[nodiscard]] std::expected<std::shared_ptr<Session>, SessionError> install(
+      PeerId peer, std::uint16_t local_key_id, std::uint16_t remote_key_id,
+      TrafficKeys send_keys, TrafficKeys receive_keys);
 
-  [[nodiscard]] std::expected<Session*, SessionError> install(PeerId peer,
-                                                              std::uint16_t local_key_id,
-                                                              Session session);
+  [[nodiscard]] std::expected<std::shared_ptr<Session>, SessionError> install(
+      PeerId peer, std::uint16_t local_key_id, Session session);
 
-  [[nodiscard]] Session* find_by_key_id(std::uint16_t key_id) noexcept;
+  [[nodiscard]] std::shared_ptr<Session> find_by_key_id(std::uint16_t key_id) noexcept;
 
-  [[nodiscard]] Session* find_by_peer(PeerId peer) noexcept;
+  [[nodiscard]] std::shared_ptr<Session> find_by_peer(PeerId peer) noexcept;
 
   void remove(std::uint16_t local_key_id) noexcept;
 
   void expire_retired(Instant now) noexcept;
+
+  template <typename Visitor>
+  void for_each(Visitor&& visitor) {
+    for (auto& [key_id, session] : sessions_) {
+      static_cast<void>(key_id);
+      if (session) visitor(*session);
+    }
+  }
 
   [[nodiscard]] std::size_t size() const noexcept { return sessions_.size(); }
 
@@ -153,7 +164,7 @@ class SessionTable {
     Instant retired_at{};
   };
 
-  std::unordered_map<std::uint16_t, Session> sessions_;
+  std::unordered_map<std::uint16_t, std::shared_ptr<Session>> sessions_;
   std::unordered_map<PeerId, std::uint16_t> by_peer_;
   std::vector<Retired> retired_;
   std::uint64_t retired_receives_{};

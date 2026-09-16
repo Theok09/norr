@@ -38,9 +38,11 @@ cmake -S . -B "$BUILD_DIR" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PREFIX" >/dev/null
 cmake --build "$BUILD_DIR" --parallel >/dev/null
 
-say "running the test suite"
-ctest --test-dir "$BUILD_DIR" --output-on-failure >/dev/null \
-  || die "tests failed; refusing to install"
+if [ -f tests/check.hpp ]; then
+  say "running the test suite"
+  ctest --test-dir "$BUILD_DIR" --output-on-failure >/dev/null \
+    || die "tests failed; refusing to install"
+fi
 
 say "installing to $PREFIX"
 cmake --install "$BUILD_DIR" >/dev/null

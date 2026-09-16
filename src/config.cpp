@@ -1,3 +1,5 @@
+// Norr — encrypted layer 3 tunnel. Copyright (C) 2026 Theok09.
+// Licensed under the GNU AGPL v3 or later. See LICENSE.
 #include "norr/config.hpp"
 
 #include <algorithm>
@@ -235,6 +237,11 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       if (!burst) return fail(burst.error());
       if (*burst == 0) return fail(ConfigError::value_out_of_range);
       config.qos_burst_bytes = *burst;
+    } else if (qualified == "transport.profile") {
+      if (value == "standard") config.profile = TrafficProfile::standard;
+      else if (value == "quic") config.profile = TrafficProfile::quic;
+      else if (value == "dns") config.profile = TrafficProfile::dns;
+      else return fail(ConfigError::invalid_value);
     } else if (qualified == "fec.mode") {
       if (value == "off") config.fec = FecMode::off;
       else if (value == "light") config.fec = FecMode::light;

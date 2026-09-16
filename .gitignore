@@ -14,3 +14,9 @@ core.*
 .DS_Store
 
 /dist/
+
+# The test suite is kept local, not published.
+tests/
+scripts/e2e_*.sh
+bench/
+fuzz/

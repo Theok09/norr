@@ -1,3 +1,5 @@
+// Norr — encrypted layer 3 tunnel. Copyright (C) 2026 Theok09.
+// Licensed under the GNU AGPL v3 or later. See LICENSE.
 #pragma once
 
 #include <cstddef>
@@ -16,6 +18,7 @@
 #include "norr/session.hpp"
 #include "norr/carrier.hpp"
 #include "norr/fec.hpp"
+#include "norr/traffic_profile.hpp"
 #include "norr/tun.hpp"
 #include "norr/udp_transport.hpp"
 
@@ -117,6 +120,14 @@ class Worker {
   [[nodiscard]] const FecStats& fec_stats() const noexcept { return encoder_.stats(); }
   [[nodiscard]] const FecStats& fec_decode_stats() const noexcept { return decoder_.stats(); }
 
+  void set_traffic_profile(TrafficProfile profile) noexcept { profile_ = profile; }
+
+  [[nodiscard]] TrafficProfile traffic_profile() const noexcept { return profile_; }
+
+  std::size_t send_chaff(Instant now);
+
+  [[nodiscard]] std::uint64_t chaff_sent() const noexcept { return chaff_sent_; }
+
   [[nodiscard]] bool queueing_enabled() const noexcept { return queueing_enabled_; }
   [[nodiscard]] const Scheduler& scheduler() const noexcept { return scheduler_; }
   [[nodiscard]] const Pacer& pacer() const noexcept { return pacer_; }
@@ -198,6 +209,10 @@ class Worker {
   Pacer pacer_;
   std::uint64_t bytes_sent_{};
   std::uint64_t bytes_dropped_{};
+
+  TrafficProfile profile_{TrafficProfile::standard};
+  Instant last_outbound_{};
+  std::uint64_t chaff_sent_{};
   bool queueing_enabled_{};
 
   IngressFilter ingress_filter_;
