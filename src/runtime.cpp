@@ -78,13 +78,6 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
     return std::unexpected(Diagnostic{RuntimeError::crypto_unavailable, {}});
   }
 
-  if (config.transport == TransportMode::quic) {
-    return std::unexpected(
-        Diagnostic{RuntimeError::option_not_implemented,
-                   "transport.mode: the QUIC carrier is not a working tunnel transport yet. "
-                   "Norr's own handshake still goes out on the raw socket the QUIC connection "
-                   "owns, and there is no QUIC listener, so a peer cannot answer"});
-  }
   if (config.fec != FecMode::off) {
     return std::unexpected(Diagnostic{RuntimeError::option_not_implemented,
                                       "fec.mode: the encoder exists but has no wire framing in the "
@@ -180,7 +173,44 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
 
   listen_port_ = config.listen_port;
 
-  if (config.transport == TransportMode::tcp_tls) {
+  if (config.transport == TransportMode::quic) {
+    // QUIC carries a connection between two endpoints, like TCP: one peer per
+    // carrier. The node with a configured endpoint dials, the other answers.
+    const PeerConfig* partner = nullptr;
+    for (PeerId peer = 1; peer <= peer_count_; ++peer) {
+      const auto* candidate = control_->find_peer(peer);
+      if (candidate == nullptr) continue;
+      partner = candidate;
+      if (candidate->endpoint.has_value()) break;
+    }
+    if (partner == nullptr) {
+      return std::unexpected(Diagnostic{RuntimeError::control_failed,
+                                        "transport.mode = quic needs a configured peer"});
+    }
+    if (peer_count_ > 1) {
+      return std::unexpected(
+          Diagnostic{RuntimeError::option_not_implemented,
+                     "transport.mode = quic carries one peer per connection; "
+                     "configure a single peer or use udp"});
+    }
+    if (!quic_available()) {
+      return std::unexpected(Diagnostic{RuntimeError::option_not_implemented,
+                                        "transport.mode = quic needs a QUIC backend"});
+    }
+
+    auto connection = make_quic_connection();
+    if (!connection) {
+      return std::unexpected(Diagnostic{RuntimeError::option_not_implemented,
+                                        std::string{quic_error_message(connection.error())}});
+    }
+    quic_ = std::move(*connection);
+
+    const auto listening = !partner->endpoint.has_value();
+    const auto far = listening ? *bind_address : *partner->endpoint;
+
+    carrier_ = std::make_unique<QuicCarrier>(*quic_, transport_, far, *bind_address, listening);
+    active_kind_ = TransportKind::quic;
+  } else if (config.transport == TransportMode::tcp_tls) {
     // TCP carries a stream between exactly two endpoints, so the carrier binds
     // to one peer. A node with a configured endpoint dials; one without listens.
     const PeerConfig* partner = nullptr;
@@ -428,6 +458,24 @@ void Runtime::service_tcp_carrier(Instant now) {
   }
 }
 
+void Runtime::service_quic_carrier() {
+  if (active_kind_ != TransportKind::quic) return;
+
+  auto* quic_carrier = dynamic_cast<QuicCarrier*>(carrier_.get());
+  if (quic_carrier == nullptr) return;
+
+  const auto was_ready = quic_ready_;
+  quic_carrier->poll();
+  quic_ready_ = quic_carrier->ready();
+
+  // Nothing can be sent until QUIC itself is established, so the Noise
+  // handshake waits for that rather than being dialled into a connection that
+  // does not exist yet.
+  if (quic_ready_ && !was_ready) {
+    static_cast<void>(dial_configured_peers());
+  }
+}
+
 void Runtime::redial_dead_peers(Instant now) {
   if (now - last_liveness_sweep_ < kKeepaliveInterval) return;
   last_liveness_sweep_ = now;
@@ -497,6 +545,7 @@ void Runtime::run() {
     sessions_.expire_retired(now);
     redial_dead_peers(now);
     service_tcp_carrier(now);
+    service_quic_carrier();
 
     if (reload_requested_.exchange(false, std::memory_order_relaxed)) {
       const auto applied = reload(config_path_);

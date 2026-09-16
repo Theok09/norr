@@ -109,10 +109,27 @@ class TcpCarrier final : public Carrier {
   TransportStats stats_{};
 };
 
+// Norr frames inside QUIC DATAGRAM.
+//
+// The socket is shared with QUIC itself: every datagram that arrives is fed to
+// ngtcp2, and what comes back out are the DATAGRAM payloads. Norr's own
+// handshake rides inside those payloads rather than beside them, so the two
+// protocols never contend for the same socket.
+//
+// A node with a configured peer endpoint dials. One without waits for an
+// Initial and answers it, which is what `listening_` selects.
 class QuicCarrier final : public Carrier {
  public:
-  QuicCarrier(QuicConnection& connection, UdpTransport& socket, const Endpoint& peer) noexcept
-      : connection_(&connection), socket_(&socket), peer_(peer) {}
+  QuicCarrier(QuicConnection& connection, UdpTransport& socket, const Endpoint& peer,
+              const Endpoint& local, bool listening) noexcept
+      : connection_(&connection), socket_(&socket), peer_(peer), local_(local),
+        listening_(listening) {}
+
+  // Drives the QUIC handshake: dials on the initiating side, answers an
+  // Initial on the listening one, and flushes whatever ngtcp2 wants to send.
+  void poll();
+
+  [[nodiscard]] bool ready() const noexcept { return connection_->established(); }
 
   [[nodiscard]] TransportKind kind() const noexcept override { return TransportKind::quic; }
 
@@ -129,9 +146,15 @@ class QuicCarrier final : public Carrier {
   }
 
  private:
+  void flush();
+
   QuicConnection* connection_;
   UdpTransport* socket_;
   Endpoint peer_;
+  Endpoint local_{};
+  bool listening_{};
+  bool dialed_{};
+  bool accepted_{};
   std::vector<std::span<const std::byte>> inbox_;
   TransportStats stats_{};
 };

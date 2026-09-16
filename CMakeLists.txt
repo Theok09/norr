@@ -327,6 +327,13 @@ if(NORR_BUILD_TESTS)
             SKIP_RETURN_CODE 77
             TIMEOUT 120)
 
+        add_test(NAME norr_e2e_quic
+                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norr>
+                         bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_quic.sh)
+        set_tests_properties(norr_e2e_quic PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 120)
+
         add_test(NAME norr_e2e_multipeer
                  COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norr>
                          bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_multipeer.sh)
