@@ -26,15 +26,23 @@ Verified: the same soak now reports 0% packet loss, both nodes report
 `completed 2`, and no `no_session` drops. Run it with
 `NORR_SOAK=1 bash scripts/e2e_tunnel.sh`.
 
-## Only the dialing side can rekey
+## Peer restart (fixed)
 
-Observed: a node with no `endpoint` configured for its peer never re-initiates.
-`ControlPlane::start_handshake` requires a configured endpoint, so a
-listen-only node cannot start a handshake even after it has learned the peer's
-address from an authenticated packet.
+Previously a node whose peer restarted stayed on a dead session. Only the
+dialing side can re-initiate, and nothing re-armed a handshake except the
+120-second rekey timer, so a server restart meant up to two minutes of silence
+before traffic resumed. Observed: 100% packet loss after the restart, the
+restarted server counting `no session for peer or key id`, and the client
+reporting `handshakes started 1` rather than 2.
 
-Needed: allow rekey to use the session's authenticated endpoint rather than the
-configured one.
+`Session` now records when it last opened an authenticated frame, and the
+runtime sweeps for sessions silent past `kDeadPeerTimeout`, drops them, and
+re-handshakes. Verified: `NORR_RESTART=1 bash scripts/e2e_tunnel.sh` kills the
+server, brings it back, and the tunnel recovers on its own.
+
+Still true: only a peer with a configured `endpoint` can re-initiate. A
+listen-only node cannot dial back, so a restart on that side is recovered by
+the peer that dials, not by itself.
 
 ## QUIC is not a working tunnel carrier
 
@@ -92,10 +100,13 @@ given and never probed or adjusted.
 
 ## Timers that are defined but never armed
 
-`session_expiry`, `path_probe` and `dead_peer` exist in `TimerKind` and are
-handled as no-ops. Nothing schedules them, so they cannot fire. A peer that
-goes away is detected only when its keepalive stops arriving, and nothing acts
-on that yet.
+`session_expiry` and `path_probe` exist in `TimerKind` and are handled as
+no-ops. Nothing schedules them, so they cannot fire.
+
+`dead_peer` is no longer among them in effect: liveness is now checked by the
+runtime sweep described under "Peer restart", which uses `kDeadPeerTimeout`
+directly rather than a scheduled timer. The `TimerKind` entry itself remains
+unused.
 
 ## Not field-validated
 

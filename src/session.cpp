@@ -82,6 +82,7 @@ std::expected<std::size_t, SessionError> Session::open(const PacketView& view,
   }
 
   ++stats_.received;
+  last_received_ = std::chrono::steady_clock::now();
   return *opened;
 }
 

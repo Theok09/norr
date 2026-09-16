@@ -258,6 +258,28 @@ void Runtime::send_keepalive(PeerId peer) {
   static_cast<void>(carrier_->send_batch(batch));
 }
 
+void Runtime::redial_dead_peers(Instant now) {
+  if (now - last_liveness_sweep_ < kKeepaliveInterval) return;
+  last_liveness_sweep_ = now;
+
+  for (PeerId peer = 1; peer <= peer_count_; ++peer) {
+    const auto* configured = control_->find_peer(peer);
+    if (configured == nullptr || !configured->endpoint.has_value()) continue;
+
+    auto* session = sessions_.find_by_peer(peer);
+    if (session == nullptr) continue;
+    if (!session->has_received()) continue;
+    if (now - session->last_received() < kDeadPeerTimeout) continue;
+
+    sessions_.remove(session->local_key_id());
+    timers_.cancel(TimerKind::rekey, peer);
+    timers_.cancel(TimerKind::keepalive, peer);
+
+    const auto outgoing = control_->start_handshake(peer, now);
+    if (outgoing) send_outgoing(*outgoing);
+  }
+}
+
 void Runtime::service_timers(Instant now) {
   const auto events = timers_.expire(now);
   if (events.empty()) return;
@@ -301,6 +323,7 @@ void Runtime::run() {
 
     control_->evaluate_load(control_->pending(), ControlPlane::kMaximumPending, now);
     sessions_.expire_retired(now);
+    redial_dead_peers(now);
 
     if (metrics_.listening()) {
       const MetricsSnapshot snapshot{.worker = &worker_->stats(),
