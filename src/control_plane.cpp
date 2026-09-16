@@ -7,10 +7,17 @@
 
 namespace norr {
 namespace {
+[[nodiscard]] std::uint64_t handshake_timestamp() noexcept {
+  const auto since = std::chrono::system_clock::now().time_since_epoch();
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(since).count());
+}
+
 [[nodiscard]] std::vector<std::byte> build_payload(const ProtocolVersion& version,
                                                    std::uint32_t capabilities,
-                                                   std::uint16_t key_id) {
-  std::vector<std::byte> payload(8);
+                                                   std::uint16_t key_id,
+                                                   std::uint64_t timestamp) {
+  std::vector<std::byte> payload(16);
   payload[0] = static_cast<std::byte>(version.major);
   payload[1] = static_cast<std::byte>(version.minor);
   payload[2] = static_cast<std::byte>((capabilities >> 24U) & 0xFFU);
@@ -19,7 +26,19 @@ namespace {
   payload[5] = static_cast<std::byte>(capabilities & 0xFFU);
   payload[6] = static_cast<std::byte>((key_id >> 8U) & 0xFFU);
   payload[7] = static_cast<std::byte>(key_id & 0xFFU);
+  for (std::size_t index = 0; index < 8; ++index) {
+    payload[8 + index] = static_cast<std::byte>((timestamp >> ((7 - index) * 8U)) & 0xFFU);
+  }
   return payload;
+}
+
+[[nodiscard]] std::uint64_t payload_timestamp(std::span<const std::byte> payload) noexcept {
+  if (payload.size() < 16) return 0;
+  std::uint64_t value = 0;
+  for (std::size_t index = 0; index < 8; ++index) {
+    value = (value << 8U) | static_cast<std::uint64_t>(payload[8 + index]);
+  }
+  return value;
 }
 
 [[nodiscard]] std::uint16_t payload_key_id(std::span<const std::byte> payload) noexcept {
@@ -28,7 +47,7 @@ namespace {
                                     static_cast<std::uint16_t>(payload[7]));
 }
 
-constexpr std::size_t kHandshakePayloadSize = 8;
+constexpr std::size_t kHandshakePayloadSize = 16;
 
 }
 
@@ -62,7 +81,7 @@ std::expected<OutgoingHandshake, ControlError> ControlPlane::build_initiation(Pe
                                : ControlError::handshake_failed);
   }
 
-  const auto payload = build_payload(ProtocolVersion{}, 0, entry.local_key_id);
+  const auto payload = build_payload(ProtocolVersion{}, 0, entry.local_key_id, handshake_timestamp());
   std::vector<std::byte> message(kNoiseMessage1Overhead + payload.size());
   const auto written = handshake->write_message_1(payload, message);
   if (!written) return std::unexpected(ControlError::handshake_failed);
@@ -274,10 +293,18 @@ std::expected<std::optional<OutgoingHandshake>, ControlError> ControlPlane::hand
         return std::unexpected(ControlError::invalid_message);
       }
 
+      const auto timestamp = payload_timestamp(payload);
+      if (const auto seen = greatest_timestamp_.find(matched_id);
+          seen != greatest_timestamp_.end() && timestamp <= seen->second) {
+        ++stats_.replayed_initiations;
+        return std::unexpected(ControlError::invalid_message);
+      }
+      greatest_timestamp_[matched_id] = timestamp;
+
       const auto key_id = sessions_->allocate_key_id();
       if (!key_id) return std::unexpected(ControlError::session_install_failed);
 
-      const auto reply_payload = build_payload(ProtocolVersion{}, 0, *key_id);
+      const auto reply_payload = build_payload(ProtocolVersion{}, 0, *key_id, handshake_timestamp());
       std::vector<std::byte> message(kNoiseMessage2Overhead + reply_payload.size());
       const auto written = handshake->write_message_2(reply_payload, message);
       if (!written) {

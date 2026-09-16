@@ -212,6 +212,68 @@ void test_forged_frame_does_not_promote() {
   std::puts("control: forged frame does not promote provisional state OK");
 }
 
+// A captured INIT must not work twice.
+//
+// Without a timestamp in the handshake payload, an attacker who recorded an
+// initiation could replay it and make the responder perform Diffie-Hellman and
+// build provisional state for a peer that never sent anything. WireGuard
+// solves this by keeping the greatest timestamp seen per peer and discarding
+// anything at or below it; Norr does the same.
+void test_replayed_initiation_is_refused() {
+  Node alice;
+  Node bob;
+  alice.identity = make_identity();
+  bob.identity = make_identity();
+  alice.build();
+  bob.build();
+
+  const auto psk = make_psk(0x44);
+  const auto alice_endpoint = endpoint_of("127.0.0.1:41031");
+  const auto bob_endpoint = endpoint_of("127.0.0.1:41032");
+
+  NORR_CHECK(alice.control
+                 ->add_peer(norr::PeerConfig{.id = 2,
+                                             .static_public = bob.identity.public_key,
+                                             .preshared = psk,
+                                             .endpoint = bob_endpoint})
+                 .has_value());
+  NORR_CHECK(bob.control
+                 ->add_peer(norr::PeerConfig{.id = 1,
+                                             .static_public = alice.identity.public_key,
+                                             .preshared = psk,
+                                             .endpoint = alice_endpoint})
+                 .has_value());
+
+  const auto now = std::chrono::steady_clock::now();
+
+  const auto initiation = alice.control->start_handshake(2, now);
+  NORR_CHECK(initiation.has_value());
+
+  // The genuine initiation is accepted.
+  const auto first = bob.control->handle_datagram(alice_endpoint, initiation->datagram, now);
+  NORR_CHECK(first.has_value() && first->has_value());
+  NORR_CHECK(bob.control->stats().responder_handshakes == 1);
+  NORR_CHECK(bob.control->provisional() == 1);
+
+  // The identical datagram a second time must be refused, and must not create
+  // a second provisional entry or consume another key id.
+  const auto replayed = bob.control->handle_datagram(alice_endpoint, initiation->datagram, now);
+  NORR_CHECK(!replayed.has_value());
+  NORR_CHECK(bob.control->stats().replayed_initiations == 1);
+  NORR_CHECK(bob.control->stats().responder_handshakes == 1);
+  NORR_CHECK(bob.control->provisional() == 1);
+
+  // A fresh initiation from the same peer still works: the check rejects
+  // stale timestamps, not the peer.
+  const auto second = alice.control->start_handshake(2, now);
+  NORR_CHECK(second.has_value());
+  const auto accepted = bob.control->handle_datagram(alice_endpoint, second->datagram, now);
+  NORR_CHECK(accepted.has_value() && accepted->has_value());
+  NORR_CHECK(bob.control->stats().responder_handshakes == 2);
+
+  std::puts("control: replayed initiation refused OK");
+}
+
 void test_wrong_psk_produces_no_session() {
   Node alice;
   Node bob;
@@ -512,6 +574,7 @@ int main() {
 
   test_full_handshake_through_control_plane();
   test_forged_frame_does_not_promote();
+  test_replayed_initiation_is_refused();
   test_wrong_psk_produces_no_session();
   test_unknown_peer_is_refused();
   test_rate_limiting_sheds_flood();

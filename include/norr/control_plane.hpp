@@ -66,6 +66,7 @@ struct ControlStats {
   std::uint64_t cookies_accepted{};
   std::uint64_t mac1_failures{};
   std::uint64_t mac2_failures{};
+  std::uint64_t replayed_initiations{};
 };
 
 struct OutgoingHandshake {
@@ -160,6 +161,7 @@ class ControlPlane {
 
   std::unordered_map<std::uint16_t, Provisional> provisional_;
   std::vector<PeerId> keepalive_due_;
+  std::unordered_map<PeerId, std::uint64_t> greatest_timestamp_;
   SourceRateLimiter rate_limiter_;
   GlobalLimiter global_limiter_;
   CookieIssuer issuer_;

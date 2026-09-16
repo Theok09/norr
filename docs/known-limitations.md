@@ -109,6 +109,23 @@ has been silent past `kDeadPeerTimeout` or that has exceeded either
 `kSessionExpiry` or `kRejectAfterMessages`, then re-handshakes. The `TimerKind`
 entries themselves remain unused.
 
+## Handshake replay (fixed)
+
+Previously the handshake payload carried only a version, a capability bitmap
+and a key id. Nothing bound an initiation to a point in time, so a captured
+INIT could be replayed: the responder would perform Diffie-Hellman, allocate a
+key id, and build provisional state for a peer that had sent nothing. The
+per-address rate limiter bounded how often that could happen but did not make
+it wrong.
+
+WireGuard solves this by keeping the greatest timestamp seen per peer and
+discarding anything at or below it. Norr now does the same: the payload carries
+a 64-bit nanosecond timestamp inside the Noise transcript, and the responder
+rejects a stale one before allocating a key id or creating provisional state.
+`replayed_initiations` counts them.
+
+Verified by removing the check and watching `norr_control_plane_tests` fail.
+
 ## Limits follow WireGuard's timer state machine
 
 Norr uses the same profile as WireGuard, so it uses the same bounds rather than
