@@ -102,8 +102,10 @@ ip netns exec norr-fb ip route add 10.98.0.1/32 dev fecB 2>/dev/null
 sleep 1.5
 
 # With a clean carrier FEC must cost nothing: no loss, no reordering damage.
-CLEAN=$(ip netns exec norr-fb ping -c10 -i0.2 -W3 -I 10.98.0.2 10.98.0.1 2>&1 \
-        | tr ',' '\n' | sed -n 's/^ *\([0-9]\+\)% packet loss.*/\1/p')
+CLEAN=$(ip netns exec norr-fb ping -c10 -i0.2 -W1 -I 10.98.0.2 10.98.0.1 2>&1 \
+        | awk -F'[,%]' '/packet loss/ {
+             for (i = 1; i <= NF; ++i) if ($i ~ /packet loss/) printf "%d\n", $(i-1) + 0.5
+           }')
 [ "${CLEAN:-100}" -eq 0 ] && ok "clean carrier carries traffic with FEC on" \
   || bad "clean carrier lost ${CLEAN:-?}% with FEC on"
 
@@ -111,8 +113,10 @@ CLEAN=$(ip netns exec norr-fb ping -c10 -i0.2 -W3 -I 10.98.0.2 10.98.0.1 2>&1 \
 ip netns exec norr-fa tc qdisc add dev vfa root netem loss "${LOSS}%" || exit 1
 ip netns exec norr-fb tc qdisc add dev vfb root netem loss "${LOSS}%" || exit 1
 
-LOSSY=$(ip netns exec norr-fb ping -c60 -i0.2 -W3 -I 10.98.0.2 10.98.0.1 2>&1 \
-        | tr ',' '\n' | sed -n 's/^ *\([0-9]\+\)% packet loss.*/\1/p')
+LOSSY=$(ip netns exec norr-fb ping -c60 -i0.2 -W1 -I 10.98.0.2 10.98.0.1 2>&1 \
+        | awk -F'[,%]' '/packet loss/ {
+             for (i = 1; i <= NF; ++i) if ($i ~ /packet loss/) printf "%d\n", $(i-1) + 0.5
+           }')
 echo "info - carrier loss ${LOSS}% each way, tunnel loss ${LOSSY:-?}%"
 
 # A round trip crosses two lossy hops, so without recovery the expected loss is

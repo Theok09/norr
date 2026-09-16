@@ -57,7 +57,6 @@ add_library(norr_core
     src/tcp_transport.cpp
     src/udp_transport.cpp
     src/worker.cpp
-    src/worker_pool.cpp
 )
 target_include_directories(norr_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(norr_core PUBLIC cxx_std_23)
@@ -241,9 +240,6 @@ if(NORR_BUILD_TESTS)
     add_executable(norr_pacer_tests tests/pacer_test.cpp)
     target_link_libraries(norr_pacer_tests PRIVATE norr_core tests_support)
     add_test(NAME norr_pacer_tests COMMAND norr_pacer_tests)
-    add_executable(norr_worker_pool_tests tests/worker_pool_test.cpp)
-    target_link_libraries(norr_worker_pool_tests PRIVATE norr_core tests_support)
-    add_test(NAME norr_worker_pool_tests COMMAND norr_worker_pool_tests)
     add_executable(norr_tcp_transport_tests tests/tcp_transport_test.cpp)
     target_link_libraries(norr_tcp_transport_tests PRIVATE norr_core tests_support)
     add_test(NAME norr_tcp_transport_tests COMMAND norr_tcp_transport_tests)
@@ -347,6 +343,20 @@ if(NORR_BUILD_TESTS)
         set_tests_properties(norr_e2e_fec PROPERTIES
             SKIP_RETURN_CODE 77
             TIMEOUT 180)
+
+        add_test(NAME norr_e2e_ipv6
+                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norr>
+                         bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_ipv6.sh)
+        set_tests_properties(norr_e2e_ipv6 PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 120)
+
+        add_test(NAME norr_e2e_fallback
+                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norr>
+                         bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_fallback.sh)
+        set_tests_properties(norr_e2e_fallback PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 300)
     endif()
 endif()
 

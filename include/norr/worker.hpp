@@ -121,9 +121,36 @@ class Worker {
   [[nodiscard]] const Scheduler& scheduler() const noexcept { return scheduler_; }
   [[nodiscard]] const Pacer& pacer() const noexcept { return pacer_; }
 
+  // Applies a rate chosen by congestion control. Only meaningful while
+  // queueing is enabled; without a queue there is nothing to pace.
+  void set_pacing_rate(double bytes_per_second) noexcept {
+    if (queueing_enabled_) pacer_.set_rate_bytes_per_second(bytes_per_second);
+  }
+
+  // Bytes the datapath has put on the wire and bytes it failed to, which is
+  // what congestion control reads as delivered and lost.
+  [[nodiscard]] std::uint64_t bytes_sent() const noexcept { return bytes_sent_; }
+  [[nodiscard]] std::uint64_t bytes_dropped() const noexcept { return bytes_dropped_; }
+
   std::size_t flush(Instant now) {
     flush_fec(now);
     return drain_queue(now);
+  }
+
+  // Called when a control frame arrives carrying an echo request, with the
+  // peer it came from and the opaque token to send back. Echoing is the
+  // runtime's job because only it owns the carrier.
+  using EchoResponder = std::function<void(PeerId, std::span<const std::byte>)>;
+
+  void set_echo_responder(EchoResponder responder) { echo_responder_ = std::move(responder); }
+
+  // Called when an echo reply arrives, with the token that was sent and the
+  // peer that returned it. The round trip it measures is the only real RTT
+  // signal the datapath has.
+  using EchoReplyHandler = std::function<void(PeerId, std::span<const std::byte>)>;
+
+  void set_echo_reply_handler(EchoReplyHandler handler) {
+    echo_reply_handler_ = std::move(handler);
   }
 
   using IngressFilter = std::function<bool(const Endpoint&, std::span<const std::byte>)>;
@@ -169,10 +196,14 @@ class Worker {
 
   Scheduler scheduler_;
   Pacer pacer_;
+  std::uint64_t bytes_sent_{};
+  std::uint64_t bytes_dropped_{};
   bool queueing_enabled_{};
 
   IngressFilter ingress_filter_;
   ProvisionalOpener provisional_opener_;
+  EchoResponder echo_responder_;
+  EchoReplyHandler echo_reply_handler_;
 
   FecEncoder encoder_;
   FecDecoder decoder_;

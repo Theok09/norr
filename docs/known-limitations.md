@@ -125,6 +125,47 @@ because a block size of 4 puts one parity packet on the wire for every four
 data packets, and at 20% loss the parity is lost as often as anything else.
 The mode names describe parity density, not outcome.
 
+## Multi-threaded datapath (removed)
+
+There was a `WorkerPool` that opened a multi-queue TUN and ran a `Worker` per
+thread. It was never wired into the runtime, and wiring it as written would
+have been a vulnerability rather than a speedup.
+
+Every worker shared one `SessionTable`, and `Session::seal` advances a
+`PacketCounter` that is a plain `std::uint64_t` with no synchronisation. Two
+threads sealing on the same session can be handed the same counter, and a
+repeated counter under the same key is a repeated ChaCha20-Poly1305 nonce -
+which discloses the XOR of two plaintexts and forfeits authentication. The
+receive side has the same problem in the replay window.
+
+Making it safe means giving each thread its own sessions, not locking a shared
+table: a mutex on the datapath would cost more than the second core returns.
+That is a design change, so the code was deleted rather than left in the tree
+looking available. Throughput is one core's worth.
+
+## Congestion control (wired)
+
+Previously `CongestionController` was tested but unreachable: nothing in the
+datapath constructed one, and it needed a round-trip time that nothing
+measured. Feeding it a zero RTT would have been worse than leaving it out - with
+no delay signal it can only ever back off and never probe back up, so the rate
+would ratchet down and stay there.
+
+The round trip is now measured rather than assumed. A keepalive carries an echo
+request with an opaque token; the peer returns it in a control frame; the
+sender times the difference. Both halves are inside the AEAD, so a forged echo
+cannot move the estimate, and a reply claiming more than `kMaximumPlausibleRtt`
+is discarded as a token that predates a restart. Measured on a veth pair the
+tunnel reports `rtt 0.1 ms`, which is the right order for that link.
+
+The controller runs only when `[qos] enabled = true`, because without a queue
+there is no rate to lower. The configured `rate_bytes` is both the starting
+rate and the ceiling: congestion control moves the real rate below what the
+operator asked for, never above it.
+
+The same measurement now feeds path selection, which previously scored every
+path with a hardcoded RTT of zero.
+
 ## network.mtu (fixed)
 
 Previously an explicit `network.mtu` was refused at startup and the datapath

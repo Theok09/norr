@@ -24,6 +24,13 @@ enum class FrameType : std::uint8_t { data = 1, control, path, key, error, fec }
 
 inline constexpr std::uint16_t kPreSessionKeyId = 0;
 
+// A control frame with a payload is an echo. The first byte says which half of
+// the exchange it is; the rest is an opaque token the requester chose and the
+// responder returns unchanged. This is what gives the datapath a real RTT.
+inline constexpr std::byte kEchoRequest{1};
+inline constexpr std::byte kEchoReply{2};
+inline constexpr std::size_t kEchoTokenSize = 8;
+
 struct PacketHeader {
   std::uint8_t version{};
   FrameType type{};
