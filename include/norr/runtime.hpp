@@ -111,6 +111,10 @@ class Runtime {
 
   void redial_dead_peers(Instant now);
 
+  // Accepts an inbound TCP connection and advances the carrier's connect and
+  // TLS handshake. A no-op unless the TCP carrier is the active one.
+  void service_tcp_carrier(Instant now);
+
   [[nodiscard]] bool dispatch_control(const Endpoint& source,
                                       std::span<const std::byte> datagram);
 
@@ -122,6 +126,8 @@ class Runtime {
   SessionTable sessions_;
   TimerWheel timers_;
   std::unique_ptr<Carrier> carrier_;
+  TcpTransport tcp_;
+  TcpListener tcp_listener_;
   std::unique_ptr<ControlPlane> control_;
   std::unique_ptr<Worker> worker_;
   MetricsServer metrics_;
@@ -132,6 +138,7 @@ class Runtime {
 
   bool handled_control_{};
   std::atomic<bool> reload_requested_{false};
+  bool tcp_ready_{};
   std::string config_path_;
   std::uint16_t listen_port_{};
   Instant last_liveness_sweep_{};
