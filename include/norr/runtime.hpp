@@ -94,6 +94,8 @@ class Runtime {
 
   void send_keepalive(PeerId peer);
 
+  void redial_dead_peers(Instant now);
+
   [[nodiscard]] bool dispatch_control(const Endpoint& source,
                                       std::span<const std::byte> datagram);
 
@@ -114,6 +116,7 @@ class Runtime {
   std::size_t peer_count_{};
 
   bool handled_control_{};
+  Instant last_liveness_sweep_{};
   std::atomic<bool> running_{false};
 };
 

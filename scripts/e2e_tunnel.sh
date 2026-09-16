@@ -145,6 +145,28 @@ if ip netns exec norr-b ping -c3 -W3 -I 10.99.0.2 10.99.0.1 >ping.log 2>&1; then
   # not a tunnel, and nothing short of waiting out the timer catches it: the
   # responder's replacement keys are held provisionally and expire unless the
   # initiator confirms them, which it only does by sending something.
+  # A server that restarts must not leave the client stuck on a dead session.
+  # Only the dialing side can re-initiate, and before dead-peer detection
+  # existed it waited for the 120s rekey timer, so a restart meant two minutes
+  # of silence.
+  if [ "${NORR_RESTART:-0}" = "1" ]; then
+    echo "restart: killing node a and bringing it back"
+    ip netns pids norr-a 2>/dev/null | xargs -r kill -TERM 2>/dev/null
+    sleep 1
+    ip netns exec norr-a "$NORR" run /tmp/e2e/a.toml >a2.log 2>&1 &
+    sleep 2
+    ip netns exec norr-a ip addr add 10.99.0.1/32 dev norrA 2>/dev/null
+    ip netns exec norr-a ip link set norrA up
+    ip netns exec norr-a ip route add 10.99.0.2/32 dev norrA 2>/dev/null
+    sleep "${NORR_RESTART_WAIT:-100}"
+    if ip netns exec norr-b ping -c5 -W3 -I 10.99.0.2 10.99.0.1 >ping3.log 2>&1; then
+      ok "tunnel recovered after the server restarted"
+    else
+      bad "tunnel did not recover after the server restarted"
+      tail -3 ping3.log
+    fi
+  fi
+
   if [ "${NORR_SOAK:-0}" = "1" ]; then
     echo "soak: waiting ${NORR_SOAK_SECONDS:-150}s across the rekey timer"
     sleep "${NORR_SOAK_SECONDS:-150}"

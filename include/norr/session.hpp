@@ -88,6 +88,10 @@ class Session {
 
   [[nodiscard]] const SessionStats& stats() const noexcept { return stats_; }
 
+  [[nodiscard]] Instant last_received() const noexcept { return last_received_; }
+
+  [[nodiscard]] bool has_received() const noexcept { return stats_.received > 0; }
+
  private:
   PeerId peer_{kNoPeer};
   std::uint16_t local_key_id_{};
@@ -97,6 +101,7 @@ class Session {
   PacketCounter send_counter_;
   ReplayWindow replay_;
   std::optional<Endpoint> endpoint_;
+  Instant last_received_{};
   SessionStats stats_{};
 };
 
