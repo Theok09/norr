@@ -101,6 +101,7 @@ class FecEncoder {
   std::uint32_t block_id_{};
   std::size_t index_{};
   std::size_t widest_{};
+  std::uint16_t length_parity_{};
   std::vector<std::byte> parity_;
   std::vector<std::byte> output_;
   FecStats stats_{};
@@ -128,6 +129,8 @@ class FecDecoder {
     std::vector<std::byte> accumulator;
     std::vector<bool> present;
     std::vector<std::uint16_t> lengths;
+    std::uint16_t length_parity{};
+    bool have_length_parity{};
     Instant created{};
   };
 

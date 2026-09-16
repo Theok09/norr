@@ -7,6 +7,8 @@
 #include <expected>
 #include <string>
 #include <string_view>
+#include <mutex>
+#include <shared_mutex>
 #include <vector>
 
 #include "norr/address.hpp"
@@ -78,24 +80,36 @@ class RoutingTable {
 
   [[nodiscard]] std::expected<void, RoutingError> add_local(const Prefix& prefix);
 
-  [[nodiscard]] bool is_local(const Address& address) const noexcept;
+  [[nodiscard]] bool is_local(const Address& address) const;
 
-  [[nodiscard]] PeerId lookup(const Address& address) const noexcept;
+  [[nodiscard]] PeerId lookup(const Address& address) const;
 
-  [[nodiscard]] bool is_authorized(PeerId peer, const Address& address) const noexcept;
+  [[nodiscard]] bool is_authorized(PeerId peer, const Address& address) const;
 
   [[nodiscard]] ForwardResult classify(const IpPacketView& packet,
-                                       PeerId ingress_peer) const noexcept;
+                                       PeerId ingress_peer) const;
 
-  [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
+  [[nodiscard]] std::size_t size() const {
+    const std::shared_lock lock{guard_};
+    return entries_.size();
+  }
 
   // Drops every peer prefix, keeping the local ones.
   //
   // A reload rebuilds peer routing from the new configuration. Local addresses
   // belong to the interface, which a reload does not touch.
-  void clear_peer_routes() noexcept { entries_.clear(); }
+  void clear_peer_routes() {
+    const std::unique_lock lock{guard_};
+    entries_.clear();
+  }
 
  private:
+  // Unlocked cores. classify takes the lock once and calls these, rather than
+  // locking three times for one packet.
+  [[nodiscard]] bool is_local_locked(const Address& address) const noexcept;
+  [[nodiscard]] PeerId lookup_locked(const Address& address) const noexcept;
+  [[nodiscard]] bool is_authorized_locked(PeerId peer, const Address& address) const noexcept;
+
   struct Entry {
     Prefix prefix;
     PeerId peer{kNoPeer};
@@ -103,6 +117,11 @@ class RoutingTable {
 
   std::vector<Entry> entries_;
   std::vector<Prefix> local_;
+
+  // Datapath threads only read this table; a reload rewrites it. A shared
+  // mutex lets every worker classify in parallel and blocks them only for the
+  // moment a reload is rebuilding the routes.
+  mutable std::shared_mutex guard_;
 };
 
 }

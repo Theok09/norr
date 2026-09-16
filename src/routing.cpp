@@ -7,6 +7,7 @@
 namespace norr {
 std::expected<void, RoutingError> RoutingTable::add(PeerId peer, const Prefix& prefix) {
   if (peer == kNoPeer) return std::unexpected(RoutingError::invalid_peer);
+  const std::unique_lock lock{guard_};
   if (entries_.size() >= kMaximumPrefixes) {
     return std::unexpected(RoutingError::too_many_prefixes);
   }
@@ -26,6 +27,7 @@ std::expected<void, RoutingError> RoutingTable::add(PeerId peer, const Prefix& p
 }
 
 std::expected<void, RoutingError> RoutingTable::add_local(const Prefix& prefix) {
+  const std::unique_lock lock{guard_};
   if (local_.size() >= kMaximumPrefixes) {
     return std::unexpected(RoutingError::too_many_prefixes);
   }
@@ -35,13 +37,23 @@ std::expected<void, RoutingError> RoutingTable::add_local(const Prefix& prefix) 
   return {};
 }
 
-bool RoutingTable::is_local(const Address& address) const noexcept {
+bool RoutingTable::is_local(const Address& address) const {
+  const std::shared_lock lock{guard_};
+  return is_local_locked(address);
+}
+
+bool RoutingTable::is_local_locked(const Address& address) const noexcept {
   return std::ranges::any_of(local_, [&](const Prefix& prefix) {
     return prefix.family() == address.family() && prefix.contains(address);
   });
 }
 
-PeerId RoutingTable::lookup(const Address& address) const noexcept {
+PeerId RoutingTable::lookup(const Address& address) const {
+  const std::shared_lock lock{guard_};
+  return lookup_locked(address);
+}
+
+PeerId RoutingTable::lookup_locked(const Address& address) const noexcept {
   for (const auto& entry : entries_) {
     if (entry.prefix.family() != address.family()) continue;
     if (entry.prefix.contains(address)) return entry.peer;
@@ -49,7 +61,12 @@ PeerId RoutingTable::lookup(const Address& address) const noexcept {
   return kNoPeer;
 }
 
-bool RoutingTable::is_authorized(PeerId peer, const Address& address) const noexcept {
+bool RoutingTable::is_authorized(PeerId peer, const Address& address) const {
+  const std::shared_lock lock{guard_};
+  return is_authorized_locked(peer, address);
+}
+
+bool RoutingTable::is_authorized_locked(PeerId peer, const Address& address) const noexcept {
   if (peer == kNoPeer) return false;
   for (const auto& entry : entries_) {
     if (entry.peer != peer) continue;
@@ -60,7 +77,7 @@ bool RoutingTable::is_authorized(PeerId peer, const Address& address) const noex
 }
 
 ForwardResult RoutingTable::classify(const IpPacketView& packet,
-                                     PeerId ingress_peer) const noexcept {
+                                     PeerId ingress_peer) const {
   const auto refuse = [](ForwardDecision decision) {
     return ForwardResult{.decision = decision, .peer = kNoPeer};
   };
@@ -75,15 +92,17 @@ ForwardResult RoutingTable::classify(const IpPacketView& packet,
 
   if (packet.hop_limit <= 1) return refuse(ForwardDecision::hop_limit_exceeded);
 
-  if (ingress_peer != kNoPeer && !is_authorized(ingress_peer, packet.source)) {
+  const std::shared_lock lock{guard_};
+
+  if (ingress_peer != kNoPeer && !is_authorized_locked(ingress_peer, packet.source)) {
     return refuse(ForwardDecision::source_not_authorized);
   }
 
-  if (is_local(packet.destination)) {
+  if (is_local_locked(packet.destination)) {
     return ForwardResult{.decision = ForwardDecision::deliver_local, .peer = kNoPeer};
   }
 
-  const auto destination_peer = lookup(packet.destination);
+  const auto destination_peer = lookup_locked(packet.destination);
   if (destination_peer == kNoPeer) return refuse(ForwardDecision::no_route);
 
   if (destination_peer == ingress_peer) return refuse(ForwardDecision::routing_loop);

@@ -78,6 +78,7 @@ void FecEncoder::set_mode(FecMode mode) noexcept {
 
   index_ = 0;
   widest_ = 0;
+  length_parity_ = 0;
   parity_.clear();
 }
 
@@ -88,6 +89,11 @@ std::optional<std::span<const std::byte>> FecEncoder::add(std::span<const std::b
     widest_ = packet.size();
     parity_.resize(widest_, std::byte{0});
   }
+  // Lengths are XORed exactly as the bytes are, so the decoder recovers the
+  // missing symbol's length the same way it recovers its contents. Sending the
+  // widest length instead would leave a recovered short packet padded, and a
+  // padded packet fails the length check in parse_packet.
+  length_parity_ ^= static_cast<std::uint16_t>(packet.size());
   xor_into(parity_, packet);
   ++index_;
 
@@ -107,7 +113,7 @@ std::optional<std::span<const std::byte>> FecEncoder::flush() {
   // never sent.
   header.block_size = static_cast<std::uint8_t>(index_);
   header.parity = true;
-  header.original_length = static_cast<std::uint16_t>(widest_);
+  header.original_length = length_parity_;
 
   output_.assign(kFecHeaderSize + widest_, std::byte{0});
   static_cast<void>(serialize_fec_header(header, output_));
@@ -117,6 +123,7 @@ std::optional<std::span<const std::byte>> FecEncoder::flush() {
   ++block_id_;
   index_ = 0;
   widest_ = 0;
+  length_parity_ = 0;
   parity_.clear();
   ++stats_.blocks_encoded;
   ++stats_.parity_sent;
@@ -160,6 +167,8 @@ std::optional<std::vector<std::byte>> FecDecoder::receive(const FecSymbolHeader&
   if (header.parity) {
     if (block->have_parity) return std::nullopt;
     block->have_parity = true;
+    block->length_parity = header.original_length;
+    block->have_length_parity = true;
     // Parity is authoritative on how many symbols the block actually holds:
     // a block flushed early is shorter than the configured size the data
     // symbols advertised.
@@ -191,7 +200,18 @@ std::optional<std::vector<std::byte>> FecDecoder::receive(const FecSymbolHeader&
   }
   if (missing >= block->size) return std::nullopt;
 
+  // The accumulator is as wide as the widest symbol in the block, so a shorter
+  // recovered packet carries trailing zeros. Its true length comes back out of
+  // the length parity the same way its bytes do, and a packet handed on any
+  // longer than that fails the length check in parse_packet.
   std::vector<std::byte> recovered = block->accumulator;
+  if (block->have_length_parity) {
+    std::uint16_t length = block->length_parity;
+    for (std::size_t index = 0; index < block->present.size(); ++index) {
+      if (block->present[index]) length ^= block->lengths[index];
+    }
+    if (length > 0 && length <= recovered.size()) recovered.resize(length);
+  }
 
   const auto id = block->id;
   std::erase_if(blocks_, [id](const Block& candidate) { return candidate.id == id; });
