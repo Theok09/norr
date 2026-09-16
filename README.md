@@ -1,6 +1,6 @@
-<h1 align="center">Norr</h1>
+<p align="center"><b>N O R R</b></p>
 
-<p align="center"><strong>An encrypted Layer&nbsp;3 tunnel for Linux.</strong></p>
+<p align="center">An encrypted Layer&nbsp;3 tunnel for Linux.</p>
 
 <p align="center">
   <img alt="licence AGPL-3.0" src="https://img.shields.io/badge/licence-AGPL--3.0-1B4332?style=flat-square">
