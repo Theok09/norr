@@ -133,6 +133,7 @@ class Worker {
 
   std::vector<std::byte> tun_read_buffer_;
   std::vector<std::byte> encrypt_buffer_;
+  std::vector<std::byte> pad_buffer_;
   std::vector<std::byte> decrypt_buffer_;
   ReceiveBuffers receive_pool_;
   std::vector<InboundDatagram> inbound_;

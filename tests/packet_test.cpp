@@ -8,7 +8,45 @@
 #include "norr/packet.hpp"
 #include "norr/replay_window.hpp"
 
+// Padding to a 16-byte boundary, as WireGuard does.
+//
+// Without it the ciphertext length equals the inner packet length exactly, so
+// an observer reads the size of every packet the tunnel carries. Padding costs
+// at most 15 bytes and removes that signal.
+void test_padding_alignment() {
+  NORR_CHECK(norr::kPaddingAlignment == 16);
+
+  // A length already on the boundary is unchanged: padding must not add a
+  // whole block for nothing.
+  NORR_CHECK(norr::padded_length(0) == 0);
+  NORR_CHECK(norr::padded_length(16) == 16);
+  NORR_CHECK(norr::padded_length(1600) == 1600);
+
+  // Anything else rounds up to the next boundary.
+  NORR_CHECK(norr::padded_length(1) == 16);
+  NORR_CHECK(norr::padded_length(15) == 16);
+  NORR_CHECK(norr::padded_length(17) == 32);
+  NORR_CHECK(norr::padded_length(31) == 32);
+
+  // The expansion is bounded: at most 15 bytes, never more.
+  for (std::size_t length = 0; length < 200; ++length) {
+    const auto padded = norr::padded_length(length);
+    NORR_CHECK(padded >= length);
+    NORR_CHECK(padded - length < norr::kPaddingAlignment);
+    NORR_CHECK(padded % norr::kPaddingAlignment == 0);
+  }
+
+  // Every length in a block maps to the same padded size, which is the point:
+  // the observable size no longer distinguishes them.
+  for (std::size_t length = 81; length <= 96; ++length) {
+    NORR_CHECK(norr::padded_length(length) == 96);
+  }
+
+  std::puts("packet: padding rounds to 16 and bounds expansion OK");
+}
+
 int main() {
+  test_padding_alignment();
   constexpr std::array payload{std::byte{0x10}, std::byte{0x20}, std::byte{0x30}};
   const norr::PacketHeader header{.version = norr::kProtocolVersion, .type = norr::FrameType::data, .flags = 0, .key_id = 0xBEEF, .counter = 0x0102030405060708};
   const auto encoded = norr::serialize_packet(header, payload); NORR_CHECK(encoded.has_value());

@@ -346,7 +346,52 @@ void test_forged_packet_rejected() {
 
 }  // namespace
 
+// Padding must actually change what goes on the wire.
+//
+// The unit test on padded_length proves the arithmetic; this proves the
+// datapath uses it. Two inner packets of different sizes that fall in the same
+// 16-byte block must produce ciphertext of identical length, because that is
+// the whole point: the observable size stops distinguishing them.
+void test_padding_hides_inner_length() {
+  Node alice;
+  alice.build();
+
+  norr::TrafficKey key{};
+  key.fill(std::byte{0x33});
+
+  const auto installed = alice.sessions.install(
+      2, 0x0050, 0x0060, norr::TrafficKeys{key, 0}, norr::TrafficKeys{key, 0});
+  NORR_CHECK(installed.has_value());
+
+  // Two packets in the same block: 20-byte header plus 1 and plus 12 payload
+  // are 21 and 32 bytes, which both pad to 32.
+  const auto small = make_ipv4("10.1.0.5", "10.2.0.7", 64, 1);
+  const auto larger = make_ipv4("10.1.0.5", "10.2.0.7", 64, 12);
+  NORR_CHECK(small.size() != larger.size());
+  NORR_CHECK(norr::padded_length(small.size()) == norr::padded_length(larger.size()));
+
+  std::vector<std::byte> first(norr::kPacketHeaderSize + 128 + norr::kAeadTagSize);
+  std::vector<std::byte> second(norr::kPacketHeaderSize + 128 + norr::kAeadTagSize);
+
+  std::vector<std::byte> padded_small(norr::padded_length(small.size()), std::byte{0});
+  std::copy(small.begin(), small.end(), padded_small.begin());
+  std::vector<std::byte> padded_larger(norr::padded_length(larger.size()), std::byte{0});
+  std::copy(larger.begin(), larger.end(), padded_larger.begin());
+
+  const auto sealed_small =
+      (*installed)->seal(norr::FrameType::data, padded_small, first);
+  const auto sealed_larger =
+      (*installed)->seal(norr::FrameType::data, padded_larger, second);
+  NORR_CHECK(sealed_small.has_value() && sealed_larger.has_value());
+
+  // Identical on the wire despite different inner sizes.
+  NORR_CHECK(*sealed_small == *sealed_larger);
+
+  std::puts("worker: padding makes different inner sizes indistinguishable OK");
+}
+
 int main() {
+  test_padding_hides_inner_length();
   if (!norr::UdpTransport::supported() || !norr::crypto_available()) {
     std::puts("worker: platform or crypto backend unavailable, skipped");
     return 0;

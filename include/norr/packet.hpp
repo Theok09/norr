@@ -10,6 +10,13 @@
 
 namespace norr {
 inline constexpr std::uint8_t kProtocolVersion = 1;
+
+inline constexpr std::size_t kPaddingAlignment = 16;
+
+[[nodiscard]] constexpr std::size_t padded_length(std::size_t length) noexcept {
+  const auto remainder = length % kPaddingAlignment;
+  return remainder == 0 ? length : length + (kPaddingAlignment - remainder);
+}
 inline constexpr std::size_t kPacketHeaderSize = 16;
 inline constexpr std::size_t kMaximumPacketSize = 65'535;
 
