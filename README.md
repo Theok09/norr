@@ -9,8 +9,6 @@
   <img alt="platform Linux" src="https://img.shields.io/badge/platform-Linux-52B788?style=flat-square">
 </p>
 
----
-
 Peers are identified by X25519 static keys and authenticated with the Noise
 `IKpsk2` pattern. Traffic is sealed with ChaCha20-Poly1305 behind an 8192-entry
 replay window.
@@ -18,18 +16,17 @@ replay window.
 Norr carries IP packets, not ports. Each peer is assigned inner prefixes, and a
 packet is accepted only from a peer authorised to send that source address.
 
-| | |
-|---|---|
-| **Carriers** | UDP, QUIC (RFC 9221 DATAGRAM), TCP + TLS 1.3 |
-| **Fallback** | Automatic — moves off a blocked carrier without operator action |
-| **Loss recovery** | XOR forward error correction, measured 20% → 8% |
-| **Shaping** | Congestion control on a measured round trip; traffic profiles |
+- **Carriers** — UDP, QUIC (RFC 9221 DATAGRAM), and TCP over TLS 1.3.
+- **Fallback** — moves off a blocked carrier on its own, without an operator.
+- **Loss recovery** — XOR forward error correction; 20% carrier loss measured
+  down to 8% inside the tunnel.
+- **Shaping** — congestion control on a measured round trip, and traffic
+  profiles that pad packets onto the sizes another protocol produces.
 
 ## Install
 
-One command on Debian or Ubuntu. It installs dependencies, builds, runs the
-test suite, installs, and creates the service account — and refuses to install
-if the tests fail.
+One command on Debian or Ubuntu. It installs the dependencies, builds, installs,
+and creates the service account.
 
 ```sh
 sudo sh scripts/install.sh
