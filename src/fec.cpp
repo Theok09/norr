@@ -231,11 +231,13 @@ std::optional<FecPlan> AdaptiveFec::decide(const FecPlan& current, const FecLoss
       if (++ineffective_reports_ >= kIneffectiveBeforeSuppress) {
         ineffective_reports_ = 0;
         calm_reports_ = 0;
-        suppressed_until_ = now + kSuppression;
+        suppressed_until_ = now + suppression_;
+        suppression_ = std::min<Duration>(suppression_ * 2, kMaximumSuppression);
         return FecPlan{};
       }
     } else {
       ineffective_reports_ = 0;
+      suppression_ = kSuppression;
     }
   }
 

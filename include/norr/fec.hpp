@@ -171,11 +171,12 @@ class AdaptiveFec {
  public:
   static constexpr double kEnableLoss = 0.003;
   static constexpr double kDisableLoss = 0.001;
-  static constexpr std::uint32_t kReportsBeforeEnable = 2;
+  static constexpr std::uint32_t kReportsBeforeEnable = 3;
   static constexpr std::uint32_t kCalmBeforeDisable = 5;
   static constexpr double kMinimumRecoveredShare = 0.3;
   static constexpr std::uint32_t kIneffectiveBeforeSuppress = 3;
   static constexpr auto kSuppression = std::chrono::seconds{30};
+  static constexpr auto kMaximumSuppression = std::chrono::seconds{300};
 
   [[nodiscard]] std::optional<FecPlan> decide(const FecPlan& current, const FecLossReport& report,
                                               Instant now) noexcept;
@@ -188,6 +189,7 @@ class AdaptiveFec {
   std::uint32_t calm_reports_{};
   std::uint32_t ineffective_reports_{};
   Instant suppressed_until_{};
+  Duration suppression_{kSuppression};
 };
 
 class FecDecoder {
