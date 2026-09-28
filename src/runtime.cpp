@@ -564,7 +564,7 @@ void Runtime::note_echo_reply(PeerId peer, std::span<const std::byte> token) {
 
 bool Runtime::rtt_inflated() const noexcept {
   if (min_rtt_.count() <= 0 || last_rtt_.count() <= 0) return false;
-  const auto limit = min_rtt_ + min_rtt_ / 2 + std::chrono::milliseconds{15};
+  const auto limit = min_rtt_ * 2 + std::chrono::milliseconds{2};
   return last_rtt_ > limit;
 }
 
