@@ -3,6 +3,7 @@
 #include "norr/fec.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #if defined(__x86_64__) || defined(__i386__)
@@ -160,47 +161,98 @@ void multiply_add(std::span<std::byte> accumulator, std::span<const std::byte> s
 }
 }
 
-FecMode mode_for_loss(double loss_fraction) noexcept {
-  if (loss_fraction < 0.005) return FecMode::off;
-  if (loss_fraction < 0.02) return FecMode::light;
-  if (loss_fraction < 0.10) return FecMode::moderate;
-  return FecMode::aggressive;
+std::size_t parity_needed(std::size_t data, double loss, std::size_t limit) noexcept {
+  if (data == 0 || limit == 0) return 0;
+  const auto p = std::clamp(loss, 0.0, 0.5);
+  if (p <= 0.0) return limit;
+  const auto odds = p / (1.0 - p);
+  for (std::size_t rows = 1; rows < limit; ++rows) {
+    const auto total = data + rows;
+    auto term = std::pow(1.0 - p, static_cast<double>(total));
+    auto covered = term;
+    for (std::size_t lost = 0; lost < rows; ++lost) {
+      term *= static_cast<double>(total - lost) / static_cast<double>(lost + 1) * odds;
+      covered += term;
+    }
+    if (1.0 - covered <= kFecTargetBlockFailure) return rows;
+  }
+  return limit;
 }
 
-bool loss_warrants_path_review(double loss_fraction) noexcept {
-  return loss_fraction >= 0.10;
+FecPlan plan_for_loss(double loss, double packets_per_second) noexcept {
+  const auto design = std::min(0.4, loss * 1.5 + 0.002);
+  const auto per_flush = std::max(0.0, packets_per_second) *
+                         std::chrono::duration<double>(kFecFlushInterval).count();
+  std::size_t data = 32;
+  std::size_t lanes = 1;
+  if (per_flush >= 64.0) {
+    lanes = std::clamp<std::size_t>(static_cast<std::size_t>(per_flush / 32.0), 1, kMaximumFecLanes);
+  } else {
+    data = std::clamp<std::size_t>(static_cast<std::size_t>(per_flush), 4, 32);
+  }
+  if (design >= 0.08) data = std::min<std::size_t>(data, 16);
+  return FecPlan{.data = data,
+                 .parity = parity_needed(data, design, kMaximumFecParity),
+                 .lanes = lanes,
+                 .loss = design};
 }
 
-std::optional<FecMode> AdaptiveFec::decide(FecMode current, double raw_loss,
-                                           double residual_loss, Instant now) noexcept {
-  auto wanted = mode_for_loss(raw_loss);
-  bool immediate = false;
+std::optional<FecPlan> AdaptiveFec::decide(const FecPlan& current, const FecLossReport& report,
+                                           Instant now) noexcept {
+  if (report.congested) {
+    lossy_reports_ = 0;
+    return std::nullopt;
+  }
+
+  const auto raw = std::clamp(report.raw, 0.0, 1.0);
+  smoothed_ = raw >= smoothed_ ? raw : 0.6 * smoothed_ + 0.4 * raw;
 
   if (now < suppressed_until_) {
-    wanted = FecMode::off;
-  } else if (current != FecMode::off && raw_loss > 0.0) {
-    const auto recovered_share = (raw_loss - residual_loss) / raw_loss;
+    lossy_reports_ = 0;
+    if (current.active()) return FecPlan{};
+    return std::nullopt;
+  }
+
+  if (!current.active()) {
+    calm_reports_ = 0;
+    ineffective_reports_ = 0;
+    if (smoothed_ < kEnableLoss) {
+      lossy_reports_ = 0;
+      return std::nullopt;
+    }
+    if (++lossy_reports_ < kReportsBeforeEnable) return std::nullopt;
+    lossy_reports_ = 0;
+    return plan_for_loss(smoothed_, report.packets_per_second);
+  }
+
+  if (raw >= 0.002) {
+    const auto recovered_share = (raw - std::clamp(report.residual, 0.0, raw)) / raw;
     if (recovered_share < kMinimumRecoveredShare) {
       if (++ineffective_reports_ >= kIneffectiveBeforeSuppress) {
         ineffective_reports_ = 0;
+        calm_reports_ = 0;
         suppressed_until_ = now + kSuppression;
-        wanted = FecMode::off;
-        immediate = true;
+        return FecPlan{};
       }
     } else {
       ineffective_reports_ = 0;
     }
   }
 
-  const auto rank = [](FecMode mode) { return static_cast<int>(mode); };
-  if (rank(wanted) == rank(current)) {
+  if (smoothed_ < kDisableLoss) {
+    if (++calm_reports_ < kCalmBeforeDisable) return std::nullopt;
     calm_reports_ = 0;
-    return std::nullopt;
-  }
-  if (rank(wanted) < rank(current) && !immediate && ++calm_reports_ < kCalmBeforeDowngrade) {
-    return std::nullopt;
+    return FecPlan{};
   }
   calm_reports_ = 0;
+
+  const auto wanted = plan_for_loss(smoothed_, report.packets_per_second);
+  const auto distance = [](std::size_t left, std::size_t right) {
+    return left > right ? left - right : right - left;
+  };
+  const bool settled = wanted.lanes == current.lanes && distance(wanted.parity, current.parity) < 2 &&
+                       distance(wanted.data, current.data) * 4 <= current.data;
+  if (settled) return std::nullopt;
   return wanted;
 }
 
@@ -241,81 +293,133 @@ std::optional<FecSymbolHeader> parse_fec_header(std::span<const std::byte> bytes
   return header;
 }
 
-void FecEncoder::set_mode(FecMode mode) {
-  mode_ = mode;
-  data_count_ = block_size_for(mode);
-  parity_count_ = parity_count_for(mode);
-  index_ = 0;
-  width_ = 0;
-  parity_.assign(parity_count_, {});
-  output_.clear();
+void FecEncoder::configure(const FecPlan& plan) {
+  plan_ = plan;
+  plan_.data = std::min(plan_.data, kMaximumFecData);
+  plan_.parity = std::min(plan_.parity, kMaximumFecParity);
+  plan_.lanes = std::clamp<std::size_t>(plan_.lanes, 1, kMaximumFecLanes);
+  if (!plan_.active()) plan_ = FecPlan{};
+  cursor_ = 0;
+  output_count_ = 0;
+  for (auto& lane : lanes_) {
+    lane.index = 0;
+    lane.width = 0;
+    lane.parity.resize(plan_.parity);
+    for (auto& row : lane.parity) row.clear();
+    lane.block_id = next_block_++;
+  }
+}
+
+void FecEncoder::resume_at(std::uint32_t block_id) noexcept {
+  next_block_ = block_id;
+  for (auto& lane : lanes_) {
+    if (lane.index == 0) lane.block_id = next_block_++;
+  }
+}
+
+std::size_t FecEncoder::pending() const noexcept {
+  std::size_t total = 0;
+  for (std::size_t index = 0; index < plan_.lanes; ++index) total += lanes_[index].index;
+  return total;
 }
 
 FecSymbolHeader FecEncoder::next_header(std::size_t sealed_length) const noexcept {
-  return FecSymbolHeader{.block_id = block_id_,
-                         .index = static_cast<std::uint8_t>(index_),
-                         .block_size = static_cast<std::uint8_t>(data_count_),
-                         .parity_count = static_cast<std::uint8_t>(parity_count_),
+  const auto& lane = lanes_[cursor_];
+  return FecSymbolHeader{.block_id = lane.block_id,
+                         .index = static_cast<std::uint8_t>(lane.index),
+                         .block_size = static_cast<std::uint8_t>(plan_.data),
+                         .parity_count = static_cast<std::uint8_t>(plan_.parity),
                          .parity = false,
                          .original_length = static_cast<std::uint16_t>(sealed_length)};
 }
 
-const std::vector<std::vector<std::byte>>& FecEncoder::add(std::span<const std::byte> packet) {
-  output_.clear();
-  if (mode_ == FecMode::off || data_count_ == 0) return output_;
-  if (packet.size() > 0xFFFFU) return output_;
+std::span<const std::vector<std::byte>> FecEncoder::add(std::span<const std::byte> packet) {
+  output_count_ = 0;
+  if (!plan_.active() || packet.size() > 0xFFFFU) return {};
 
-  symbol_.resize(kFecLengthPrefix + packet.size());
+  auto& lane = lanes_[cursor_];
+  cursor_ = (cursor_ + 1) % plan_.lanes;
+
+  const auto length = kFecLengthPrefix + packet.size();
+  if (length > lane.width) {
+    lane.width = length;
+    for (auto& row : lane.parity) row.resize(lane.width, std::byte{0});
+  }
+  symbol_.resize(length);
   symbol_[0] = static_cast<std::byte>((packet.size() >> 8U) & 0xFFU);
   symbol_[1] = static_cast<std::byte>(packet.size() & 0xFFU);
   std::copy(packet.begin(), packet.end(), symbol_.begin() + kFecLengthPrefix);
-
-  if (symbol_.size() > width_) {
-    width_ = symbol_.size();
-    for (auto& row : parity_) row.resize(width_, std::byte{0});
-  }
-  for (std::size_t row = 0; row < parity_count_; ++row) {
-    gf256::multiply_add(parity_[row], symbol_, gf256::cauchy(row, index_));
+  for (std::size_t row = 0; row < plan_.parity; ++row) {
+    gf256::multiply_add(lane.parity[row], symbol_, gf256::cauchy(row, lane.index));
   }
 
-  ++index_;
-  if (index_ < data_count_) return output_;
-  return flush();
+  ++lane.index;
+  if (lane.index >= plan_.data) emit(lane, plan_.parity);
+  return std::span{output_}.first(output_count_);
 }
 
-const std::vector<std::vector<std::byte>>& FecEncoder::flush() {
-  output_.clear();
-  if (mode_ == FecMode::off || index_ == 0) return output_;
-
-  output_.resize(parity_count_);
-  for (std::size_t row = 0; row < parity_count_; ++row) {
-    const FecSymbolHeader header{.block_id = block_id_,
-                                 .index = static_cast<std::uint8_t>(row),
-                                 .block_size = static_cast<std::uint8_t>(index_),
-                                 .parity_count = static_cast<std::uint8_t>(parity_count_),
-                                 .parity = true,
-                                 .original_length = static_cast<std::uint16_t>(width_)};
-    auto& symbol = output_[row];
-    symbol.assign(kFecHeaderSize + width_, std::byte{0});
-    static_cast<void>(serialize_fec_header(header, symbol));
-    std::copy(parity_[row].begin(), parity_[row].end(),
-              symbol.begin() + static_cast<std::ptrdiff_t>(kFecHeaderSize));
-    parity_[row].clear();
+std::span<const std::vector<std::byte>> FecEncoder::flush() {
+  output_count_ = 0;
+  if (!plan_.active()) return {};
+  for (std::size_t index = 0; index < plan_.lanes; ++index) {
+    auto& lane = lanes_[index];
+    if (lane.index == 0) continue;
+    const auto rows = plan_.loss > 0.0 ? parity_needed(lane.index, plan_.loss, plan_.parity)
+                                       : plan_.parity;
+    emit(lane, rows);
   }
+  cursor_ = 0;
+  return std::span{output_}.first(output_count_);
+}
 
-  ++block_id_;
-  index_ = 0;
-  width_ = 0;
+void FecEncoder::emit(Lane& lane, std::size_t rows) {
+  if (output_.size() < output_count_ + rows) output_.resize(output_count_ + rows);
+  for (std::size_t row = 0; row < rows; ++row) {
+    const FecSymbolHeader header{.block_id = lane.block_id,
+                                 .index = static_cast<std::uint8_t>(row),
+                                 .block_size = static_cast<std::uint8_t>(lane.index),
+                                 .parity_count = static_cast<std::uint8_t>(plan_.parity),
+                                 .parity = true,
+                                 .original_length = static_cast<std::uint16_t>(lane.width)};
+    auto& symbol = output_[output_count_++];
+    symbol.resize(kFecHeaderSize + lane.width);
+    static_cast<void>(serialize_fec_header(header, symbol));
+    std::copy(lane.parity[row].begin(), lane.parity[row].end(),
+              symbol.begin() + static_cast<std::ptrdiff_t>(kFecHeaderSize));
+  }
+  for (auto& row : lane.parity) row.clear();
+  lane.block_id = next_block_++;
+  lane.index = 0;
+  lane.width = 0;
   ++stats_.blocks_encoded;
-  stats_.parity_sent += parity_count_;
-  return output_;
+  stats_.parity_sent += rows;
 }
 
 bool FecDecoder::recently_finished(std::uint32_t id) const noexcept {
   return std::ranges::find(finished_, id) != finished_.end();
 }
 
+std::vector<std::byte> FecDecoder::take_buffer() {
+  if (spare_.empty()) return {};
+  auto buffer = std::move(spare_.back());
+  spare_.pop_back();
+  buffer.clear();
+  return buffer;
+}
+
+void FecDecoder::recycle(Block& block) {
+  const auto keep = [&](std::vector<std::byte>& buffer) {
+    if (buffer.capacity() == 0 || spare_.size() >= kMaximumFecData * 8) return;
+    spare_.push_back(std::move(buffer));
+  };
+  for (auto& buffer : block.data) keep(buffer);
+  for (auto& buffer : block.parity) keep(buffer);
+}
+
 void FecDecoder::finish(std::uint32_t id) {
+  for (auto& block : blocks_) {
+    if (block.id == id) recycle(block);
+  }
   std::erase_if(blocks_, [id](const Block& block) { return block.id == id; });
   finished_.push_back(id);
   while (finished_.size() > kMaximumOutstandingBlocks * 2) finished_.pop_front();
@@ -328,6 +432,7 @@ FecDecoder::Block* FecDecoder::find_or_create(const FecSymbolHeader& header, Ins
 
   if (blocks_.size() >= kMaximumOutstandingBlocks) {
     ++stats_.unrecoverable;
+    recycle(blocks_.front());
     blocks_.pop_front();
   }
 
@@ -361,11 +466,13 @@ std::vector<std::vector<std::byte>> FecDecoder::receive(const FecSymbolHeader& h
     }
     auto& slot = block->parity[header.index];
     if (!slot.empty()) return {};
+    slot = take_buffer();
     slot.assign(payload.begin(), payload.end());
   } else {
     if (header.index >= block->data_count) return {};
     auto& slot = block->data[header.index];
     if (!slot.empty()) return {};
+    slot = take_buffer();
     slot.resize(kFecLengthPrefix + payload.size());
     slot[0] = static_cast<std::byte>((payload.size() >> 8U) & 0xFFU);
     slot[1] = static_cast<std::byte>(payload.size() & 0xFFU);
@@ -458,6 +565,7 @@ std::size_t FecDecoder::expire(Instant now) {
   std::size_t removed = 0;
   while (!blocks_.empty() && now - blocks_.front().created >= kFecRecoveryDeadline) {
     finished_.push_back(blocks_.front().id);
+    recycle(blocks_.front());
     blocks_.pop_front();
     ++removed;
     ++stats_.expired;

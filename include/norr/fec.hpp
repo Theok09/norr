@@ -38,29 +38,45 @@ enum class FecMode : std::uint8_t { off, light, moderate, aggressive, automatic 
 
 [[nodiscard]] constexpr std::size_t block_size_for(FecMode mode) noexcept {
   switch (mode) {
-    case FecMode::off: return 0;
     case FecMode::light: return 16;
     case FecMode::moderate: return 10;
     case FecMode::aggressive: return 8;
-    case FecMode::automatic: return 0;
+    default: return 0;
   }
-  return 0;
 }
 
 [[nodiscard]] constexpr std::size_t parity_count_for(FecMode mode) noexcept {
   switch (mode) {
-    case FecMode::off: return 0;
     case FecMode::light: return 2;
     case FecMode::moderate: return 3;
     case FecMode::aggressive: return 4;
-    case FecMode::automatic: return 0;
+    default: return 0;
   }
-  return 0;
 }
 
-[[nodiscard]] FecMode mode_for_loss(double loss_fraction) noexcept;
+inline constexpr std::size_t kMaximumFecLanes = 4;
+inline constexpr double kFecTargetBlockFailure = 1e-3;
 
-[[nodiscard]] bool loss_warrants_path_review(double loss_fraction) noexcept;
+struct FecPlan {
+  std::size_t data{};
+  std::size_t parity{};
+  std::size_t lanes{1};
+  double loss{};
+
+  [[nodiscard]] constexpr bool active() const noexcept { return data > 0 && parity > 0; }
+  [[nodiscard]] constexpr bool same_shape(const FecPlan& other) const noexcept {
+    return data == other.data && parity == other.parity && lanes == other.lanes;
+  }
+};
+
+[[nodiscard]] constexpr FecPlan plan_for_mode(FecMode mode) noexcept {
+  return FecPlan{.data = block_size_for(mode), .parity = parity_count_for(mode), .lanes = 1,
+                 .loss = 0.0};
+}
+
+[[nodiscard]] std::size_t parity_needed(std::size_t data, double loss, std::size_t limit) noexcept;
+
+[[nodiscard]] FecPlan plan_for_loss(double loss, double packets_per_second) noexcept;
 
 struct FecStats {
   std::uint64_t blocks_encoded{};
@@ -104,48 +120,71 @@ void multiply_add(std::span<std::byte> accumulator, std::span<const std::byte> s
 
 class FecEncoder {
  public:
-  explicit FecEncoder(FecMode mode = FecMode::off) { set_mode(mode); }
+  explicit FecEncoder(FecMode mode = FecMode::off) { configure(plan_for_mode(mode)); }
+  explicit FecEncoder(const FecPlan& plan) { configure(plan); }
 
-  void set_mode(FecMode mode);
-  [[nodiscard]] FecMode mode() const noexcept { return mode_; }
-  [[nodiscard]] std::size_t data_count() const noexcept { return data_count_; }
-  [[nodiscard]] std::size_t parity_count() const noexcept { return parity_count_; }
+  void configure(const FecPlan& plan);
+  [[nodiscard]] const FecPlan& plan() const noexcept { return plan_; }
+  [[nodiscard]] bool active() const noexcept { return plan_.active(); }
+  [[nodiscard]] std::size_t data_count() const noexcept { return plan_.data; }
+  [[nodiscard]] std::size_t parity_count() const noexcept { return plan_.parity; }
 
   [[nodiscard]] FecSymbolHeader next_header(std::size_t sealed_length) const noexcept;
 
-  [[nodiscard]] const std::vector<std::vector<std::byte>>& add(std::span<const std::byte> packet);
+  [[nodiscard]] std::span<const std::vector<std::byte>> add(std::span<const std::byte> packet);
 
-  [[nodiscard]] const std::vector<std::vector<std::byte>>& flush();
+  [[nodiscard]] std::span<const std::vector<std::byte>> flush();
 
-  [[nodiscard]] std::uint32_t current_block() const noexcept { return block_id_; }
-  void resume_at(std::uint32_t block_id) noexcept { block_id_ = block_id; }
-  [[nodiscard]] std::size_t pending() const noexcept { return index_; }
+  [[nodiscard]] std::uint32_t current_block() const noexcept { return next_block_; }
+  void resume_at(std::uint32_t block_id) noexcept;
+  [[nodiscard]] std::size_t pending() const noexcept;
   [[nodiscard]] const FecStats& stats() const noexcept { return stats_; }
 
  private:
-  FecMode mode_{FecMode::off};
-  std::size_t data_count_{};
-  std::size_t parity_count_{};
-  std::uint32_t block_id_{};
-  std::size_t index_{};
-  std::size_t width_{};
-  std::vector<std::vector<std::byte>> parity_;
+  struct Lane {
+    std::uint32_t block_id{};
+    std::size_t index{};
+    std::size_t width{};
+    std::vector<std::vector<std::byte>> parity;
+  };
+
+  void emit(Lane& lane, std::size_t rows);
+
+  FecPlan plan_{};
+  std::array<Lane, kMaximumFecLanes> lanes_{};
+  std::size_t cursor_{};
+  std::uint32_t next_block_{};
   std::vector<std::byte> symbol_;
   std::vector<std::vector<std::byte>> output_;
+  std::size_t output_count_{};
   FecStats stats_{};
+};
+
+struct FecLossReport {
+  double raw{};
+  double residual{};
+  double packets_per_second{};
+  bool congested{};
 };
 
 class AdaptiveFec {
  public:
+  static constexpr double kEnableLoss = 0.003;
+  static constexpr double kDisableLoss = 0.001;
+  static constexpr std::uint32_t kReportsBeforeEnable = 2;
+  static constexpr std::uint32_t kCalmBeforeDisable = 5;
   static constexpr double kMinimumRecoveredShare = 0.3;
   static constexpr std::uint32_t kIneffectiveBeforeSuppress = 3;
-  static constexpr std::uint32_t kCalmBeforeDowngrade = 10;
   static constexpr auto kSuppression = std::chrono::seconds{30};
 
-  [[nodiscard]] std::optional<FecMode> decide(FecMode current, double raw_loss,
-                                              double residual_loss, Instant now) noexcept;
+  [[nodiscard]] std::optional<FecPlan> decide(const FecPlan& current, const FecLossReport& report,
+                                              Instant now) noexcept;
+
+  [[nodiscard]] double smoothed_loss() const noexcept { return smoothed_; }
 
  private:
+  double smoothed_{};
+  std::uint32_t lossy_reports_{};
   std::uint32_t calm_reports_{};
   std::uint32_t ineffective_reports_{};
   Instant suppressed_until_{};
@@ -179,8 +218,11 @@ class FecDecoder {
   [[nodiscard]] std::vector<std::vector<std::byte>> try_recover(Block& block);
   [[nodiscard]] bool recently_finished(std::uint32_t id) const noexcept;
   void finish(std::uint32_t id);
+  void recycle(Block& block);
+  [[nodiscard]] std::vector<std::byte> take_buffer();
 
   std::deque<Block> blocks_;
+  std::vector<std::vector<std::byte>> spare_;
   std::deque<std::uint32_t> finished_;
   FecStats stats_{};
 };

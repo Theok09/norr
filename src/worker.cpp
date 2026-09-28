@@ -18,7 +18,8 @@ Worker::Worker(TunDevice& tun, Carrier& carrier, RoutingTable& routes,
       decrypt_buffer_(kFrameBufferSize),
       receive_pool_(UdpTransport::kDefaultBatchSize, UdpTransport::kCoalescedDatagramSize),
       inbound_(UdpTransport::kDefaultBatchSize),
-      transmit_slots_(UdpTransport::kDefaultBatchSize, std::vector<std::byte>(encrypt_buffer_.size())),
+      transmit_slots_(UdpTransport::kDefaultBatchSize,
+                      std::vector<std::byte>(kFecHeaderSize + encrypt_buffer_.size())),
       transmit_plain_(UdpTransport::kDefaultBatchSize, std::vector<std::byte>(pad_buffer_.size())),
       receive_plain_(UdpTransport::kDefaultBatchSize, std::vector<std::byte>(kFrameBufferSize)) {
   transmit_batch_.reserve(UdpTransport::kDefaultBatchSize);
@@ -43,21 +44,38 @@ std::size_t Worker::flush_transmit() {
     auto& job = transmit_jobs_[index];
     const auto sealed = job.session->seal_reserved(
         FrameType::data, job.counter, std::span{transmit_plain_[index]}.first(job.length),
-        transmit_slots_[index]);
+        std::span{transmit_slots_[index]}.subspan(kFecHeaderSize));
     job.ok = sealed.has_value();
     job.sealed = sealed.value_or(0);
   });
 
   transmit_batch_.clear();
+  const auto now = std::chrono::steady_clock::now();
+  std::size_t parity_used = 0;
   for (std::size_t index = 0; index < transmit_jobs_.size(); ++index) {
     const auto& job = transmit_jobs_[index];
     if (!job.ok) {
       stats_.record_drop(DropReason::oversized);
       continue;
     }
+    const auto slot = std::span<std::byte>{transmit_slots_[index]};
+    const auto sealed = slot.subspan(kFecHeaderSize, job.sealed);
+    if (job.fec == kNoFec || !fec_peers_[job.fec].encoder.active()) {
+      transmit_batch_.push_back(OutboundDatagram{.destination = job.destination, .payload = sealed});
+      continue;
+    }
+    auto& entry = fec_peers_[job.fec];
+    static_cast<void>(serialize_fec_header(entry.encoder.next_header(job.sealed), slot));
     transmit_batch_.push_back(OutboundDatagram{
-        .destination = job.destination,
-        .payload = std::span<const std::byte>{transmit_slots_[index]}.first(job.sealed)});
+        .destination = job.destination, .payload = slot.first(kFecHeaderSize + job.sealed)});
+    entry.destination = job.destination;
+    entry.last_symbol = now;
+    for (const auto& symbol : entry.encoder.add(sealed)) {
+      if (parity_used == parity_slots_.size()) parity_slots_.emplace_back();
+      auto& copy = parity_slots_[parity_used++];
+      copy.assign(symbol.begin(), symbol.end());
+      transmit_batch_.push_back(OutboundDatagram{.destination = job.destination, .payload = copy});
+    }
   }
   transmit_jobs_.clear();
   if (transmit_batch_.empty()) return 0;
@@ -79,12 +97,12 @@ std::size_t Worker::flush_transmit() {
   }
 
   transmit_batch_.clear();
-  if (offset > 0) last_outbound_ = std::chrono::steady_clock::now();
+  if (offset > 0) last_outbound_ = now;
   return offset;
 }
 
 DropReason Worker::forward_from_tun(std::span<const std::byte> frame) {
-  const auto reason = route_from_tun(frame, false);
+  const auto reason = route_from_tun(frame, true);
   static_cast<void>(flush_transmit());
   return reason;
 }
@@ -141,13 +159,13 @@ DropReason Worker::route_from_tun(std::span<const std::byte> frame, bool batch) 
     return DropReason::oversized;
   }
 
-  FecPeer* fec = nullptr;
+  auto fec = kNoFec;
   if (fec_mode_ != FecMode::off) {
-    fec = &fec_peer(session->peer(), *session->endpoint());
-    if (fec->encoder.mode() == FecMode::off && fec->encoder.pending() == 0) fec = nullptr;
+    fec = fec_index(session->peer(), *session->endpoint());
+    ++fec_peers_[fec].packets;
+    if (!fec_peers_[fec].encoder.active()) fec = kNoFec;
   }
-  const bool batched = batch && fec == nullptr && !queueing_enabled_;
-  if (batched) {
+  if (batch && !queueing_enabled_) {
     if (transmit_jobs_.size() >= transmit_plain_.size()) static_cast<void>(flush_transmit());
     const auto counter = session->reserve_counter();
     if (!counter) {
@@ -164,6 +182,7 @@ DropReason Worker::route_from_tun(std::span<const std::byte> frame, bool batch) 
                                          .length = padded,
                                          .destination = destination,
                                          .sealed = 0,
+                                         .fec = fec,
                                          .ok = false});
     return DropReason::none;
   }
@@ -183,8 +202,8 @@ DropReason Worker::route_from_tun(std::span<const std::byte> frame, bool batch) 
 
   auto wire = std::span<const std::byte>{encrypt_buffer_}.first(*sealed);
 
-  if (fec != nullptr && fec->encoder.mode() != FecMode::off) {
-    auto& fec_state = *fec;
+  if (fec != kNoFec) {
+    auto& fec_state = fec_peers_[fec];
     const auto header = fec_state.encoder.next_header(*sealed);
     if (serialize_fec_header(header, fec_buffer_) == kFecHeaderSize) {
       std::copy(wire.begin(), wire.end(),
@@ -193,7 +212,7 @@ DropReason Worker::route_from_tun(std::span<const std::byte> frame, bool batch) 
 
       fec_state.last_symbol = std::chrono::steady_clock::now();
       fec_state.destination = *session->endpoint();
-      const auto& parity = fec_state.encoder.add(wire);
+      const auto parity = fec_state.encoder.add(wire);
       if (!parity.empty()) {
         fec_batch_.clear();
         fec_batch_.push_back(OutboundDatagram{.destination = fec_state.destination, .payload = framed});
@@ -287,50 +306,79 @@ void Worker::enable_fec(FecMode mode) {
                      std::byte{0});
 }
 
-Worker::FecPeer& Worker::fec_peer(PeerId peer, const Endpoint& destination) {
-  for (auto& entry : fec_peers_) {
-    if (entry.peer == peer) return entry;
+std::size_t Worker::fec_index(PeerId peer, const Endpoint& destination) {
+  for (std::size_t index = 0; index < fec_peers_.size(); ++index) {
+    if (fec_peers_[index].peer == peer) return index;
   }
   const auto initial = fec_mode_ == FecMode::automatic ? FecMode::off : fec_mode_;
   fec_peers_.push_back(FecPeer{.peer = peer,
                                .destination = destination,
                                .encoder = FecEncoder{initial},
                                .last_symbol = {},
-                               .controller = {}});
-  return fec_peers_.back();
+                               .controller = {},
+                               .packets = 0,
+                               .packets_at_report = 0,
+                               .send_failures_at_report = 0,
+                               .sent_at_report = 0,
+                               .last_report = std::chrono::steady_clock::now()});
+  return fec_peers_.size() - 1;
 }
 
-FecMode Worker::peer_fec_mode(PeerId peer) const noexcept {
+Worker::FecPeer& Worker::fec_peer(PeerId peer, const Endpoint& destination) {
+  return fec_peers_[fec_index(peer, destination)];
+}
+
+FecPlan Worker::peer_fec_plan(PeerId peer) const noexcept {
   for (const auto& entry : fec_peers_) {
-    if (entry.peer == peer) return entry.encoder.mode();
+    if (entry.peer == peer) return entry.encoder.plan();
   }
-  return fec_mode_ == FecMode::automatic ? FecMode::off : fec_mode_;
+  return fec_mode_ == FecMode::automatic ? FecPlan{} : plan_for_mode(fec_mode_);
 }
 
-void Worker::note_peer_loss(PeerId peer, double raw_loss, double residual_loss, Instant now) {
-  if (fec_mode_ != FecMode::automatic) return;
+void Worker::send_parity(FecPeer& entry, std::span<const std::vector<std::byte>> parity) {
+  if (parity.empty()) return;
+  fec_batch_.clear();
+  for (const auto& symbol : parity) {
+    fec_batch_.push_back(OutboundDatagram{.destination = entry.destination, .payload = symbol});
+  }
+  static_cast<void>(send_all(fec_batch_));
+}
+
+std::optional<FecPlan> Worker::note_peer_loss(PeerId peer, double raw_loss, double residual_loss,
+                                              bool rtt_inflated, Instant now) {
+  if (fec_mode_ != FecMode::automatic) return std::nullopt;
   FecPeer* entry = nullptr;
   for (auto& candidate : fec_peers_) {
     if (candidate.peer == peer) entry = &candidate;
   }
-  if (entry == nullptr) return;
+  if (entry == nullptr) return std::nullopt;
 
-  const auto decision =
-      entry->controller.decide(entry->encoder.mode(), raw_loss, residual_loss, now);
-  if (!decision) return;
-  const auto wanted = *decision;
+  const auto elapsed = std::chrono::duration<double>(now - entry->last_report).count();
+  const auto packets = entry->packets - entry->packets_at_report;
+  const auto failures = stats_.drops_for(DropReason::send_failed) - entry->send_failures_at_report;
+  const auto sent = stats_.tun_to_udp - entry->sent_at_report;
+  entry->last_report = now;
+  entry->packets_at_report = entry->packets;
+  entry->send_failures_at_report = stats_.drops_for(DropReason::send_failed);
+  entry->sent_at_report = stats_.tun_to_udp;
 
-  if (entry->encoder.pending() > 0) {
-    const auto& parity = entry->encoder.flush();
-    fec_batch_.clear();
-    for (const auto& symbol : parity) {
-      fec_batch_.push_back(OutboundDatagram{.destination = entry->destination, .payload = symbol});
-    }
-    static_cast<void>(send_all(fec_batch_));
-  }
+  const auto local_loss =
+      sent + failures == 0 ? 0.0
+                           : static_cast<double>(failures) / static_cast<double>(sent + failures);
+  const FecLossReport report{
+      .raw = raw_loss,
+      .residual = residual_loss,
+      .packets_per_second = elapsed > 0.0 ? static_cast<double>(packets) / elapsed : 0.0,
+      .congested = rtt_inflated || (raw_loss > 0.0 && local_loss >= raw_loss * 0.5)};
+
+  const auto decision = entry->controller.decide(entry->encoder.plan(), report, now);
+  if (!decision) return std::nullopt;
+
+  send_parity(*entry, entry->encoder.flush());
   const auto next_block = entry->encoder.current_block();
-  entry->encoder = FecEncoder{wanted};
+  entry->encoder = FecEncoder{*decision};
   entry->encoder.resume_at(next_block);
+  return decision;
 }
 
 Worker::FecSource& Worker::fec_source(const Endpoint& source, Instant now) {
@@ -434,12 +482,7 @@ void Worker::flush_fec(Instant now) {
   for (auto& entry : fec_peers_) {
     if (entry.encoder.pending() == 0) continue;
     if (now - entry.last_symbol < kFecFlushInterval) continue;
-    const auto& parity = entry.encoder.flush();
-    fec_batch_.clear();
-    for (const auto& symbol : parity) {
-      fec_batch_.push_back(OutboundDatagram{.destination = entry.destination, .payload = symbol});
-    }
-    static_cast<void>(send_all(fec_batch_));
+    send_parity(entry, entry.encoder.flush());
   }
 }
 
@@ -694,7 +737,20 @@ std::size_t Worker::pump_udp_to_tun(std::size_t max_datagrams) {
     for (std::size_t index = 0; index < *received; ++index) {
       const auto& datagram = inbound_[index];
       if (ingress_filter_ && ingress_filter_(datagram.source, datagram.payload)) continue;
-      if (!looks_like_fec_symbol(datagram.payload) && stage_receive(datagram.source, datagram.payload)) {
+      if (!looks_like_fec_symbol(datagram.payload)) {
+        if (stage_receive(datagram.source, datagram.payload)) continue;
+      } else if (const auto header = parse_fec_header(datagram.payload)) {
+        const auto body = datagram.payload.subspan(kFecHeaderSize);
+        const auto now = std::chrono::steady_clock::now();
+        auto recovered = fec_source(datagram.source, now).decoder.receive(*header, body, now);
+        const bool staged = !header->parity && stage_receive(datagram.source, body);
+        if (!recovered.empty()) delivered += settle_receive();
+        for (const auto& packet : recovered) {
+          if (forward_sealed(datagram.source, packet, true) == DropReason::none) ++delivered;
+        }
+        if (staged || header->parity) continue;
+        delivered += settle_receive();
+        if (forward_sealed(datagram.source, body) == DropReason::none) ++delivered;
         continue;
       }
       delivered += settle_receive();

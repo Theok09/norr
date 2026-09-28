@@ -2,14 +2,18 @@
 // Licensed under the GNU AGPL v3 or later. See LICENSE.
 #include "norr/runtime.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <fstream>
 #include <optional>
 #include <vector>
 
 #if defined(__linux__)
+#include <linux/sock_diag.h>
 #include <poll.h>
+#include <sys/socket.h>
 #endif
 #include <thread>
 
@@ -318,7 +322,15 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
 
   worker_->set_loss_report_handler(
       [this](PeerId peer, double raw, double residual) {
-        worker_->note_peer_loss(peer, raw, residual, std::chrono::steady_clock::now());
+        const auto plan = worker_->note_peer_loss(peer, raw, residual, rtt_inflated(),
+                                                  std::chrono::steady_clock::now());
+        if (!plan) return;
+        if (plan->active()) {
+          std::fprintf(stderr, "fec: %zu+%zu x%zu for %.1f%% loss\n", plan->data, plan->parity,
+                       plan->lanes, raw * 100.0);
+        } else {
+          std::fprintf(stderr, "fec: off at %.1f%% loss\n", raw * 100.0);
+        }
       });
   fec_configured_ = config.fec != FecMode::off;
   if (config.fec != FecMode::off) {
@@ -542,7 +554,32 @@ void Runtime::note_echo_reply(PeerId peer, std::span<const std::byte> token) {
   if (elapsed.count() <= 0 || elapsed > kMaximumPlausibleRtt) return;
 
   last_rtt_ = elapsed;
+  const auto now_rtt = std::chrono::steady_clock::now();
+  if (min_rtt_.count() <= 0 || elapsed <= min_rtt_ || now_rtt - min_rtt_at_ > std::chrono::seconds{10}) {
+    min_rtt_ = elapsed;
+    min_rtt_at_ = now_rtt;
+  }
   static_cast<void>(peer);
+}
+
+bool Runtime::rtt_inflated() const noexcept {
+  if (min_rtt_.count() <= 0 || last_rtt_.count() <= 0) return false;
+  const auto limit = min_rtt_ + min_rtt_ / 2 + std::chrono::milliseconds{15};
+  return last_rtt_ > limit;
+}
+
+std::uint64_t Runtime::read_socket_drops() const noexcept {
+#if defined(__linux__) && defined(SO_MEMINFO)
+  std::array<std::uint32_t, SK_MEMINFO_VARS> info{};
+  socklen_t length = sizeof(info);
+  if (::getsockopt(transport_.descriptor(), SOL_SOCKET, SO_MEMINFO, info.data(), &length) != 0) {
+    return socket_drops_;
+  }
+  if (length < sizeof(std::uint32_t) * (SK_MEMINFO_DROPS + 1)) return socket_drops_;
+  return info[SK_MEMINFO_DROPS];
+#else
+  return socket_drops_;
+#endif
 }
 
 void Runtime::service_tcp_carrier(Instant now) {
@@ -739,13 +776,20 @@ void Runtime::redial_dead_peers(Instant now) {
 void Runtime::report_loss(Instant now) {
   if (!fec_configured_ || now - last_loss_report_ < std::chrono::seconds{1}) return;
   last_loss_report_ = now;
+  const auto drops = read_socket_drops();
+  const auto local_drops = static_cast<std::uint32_t>(drops - socket_drops_);
+  socket_drops_ = drops;
   for (PeerId peer = 1; peer <= peer_count_; ++peer) {
     auto session = sessions_.find_by_peer(peer);
     if (session == nullptr) continue;
+    send_keepalive(peer);
     const auto loss = session->take_loss_sample();
     if (!loss) continue;
-    const auto permille = [](double value) {
-      return static_cast<unsigned>(std::min(1.0, value) * 1000.0 + 0.5);
+    const auto local = loss->expected == 0
+                           ? 0.0
+                           : static_cast<double>(local_drops) / static_cast<double>(loss->expected);
+    const auto permille = [&](double value) {
+      return static_cast<unsigned>(std::clamp(value - local, 0.0, 1.0) * 1000.0 + 0.5);
     };
     const auto raw = permille(loss->raw);
     const auto residual = permille(loss->residual);

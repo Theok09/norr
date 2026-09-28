@@ -175,6 +175,11 @@ class Runtime {
   Instant switched_at_{};
 
   Duration last_rtt_{};
+  Duration min_rtt_{};
+  Instant min_rtt_at_{};
+  std::uint64_t socket_drops_{};
+  [[nodiscard]] bool rtt_inflated() const noexcept;
+  [[nodiscard]] std::uint64_t read_socket_drops() const noexcept;
 
   CongestionController congestion_;
   bool congestion_enabled_{};

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <optional>
 #include <span>
 #include <utility>
 #include <string_view>
@@ -176,9 +177,11 @@ class Worker {
                                           std::span<const std::byte> datagram,
                                           bool recovered = false);
 
-  void note_peer_loss(PeerId peer, double raw_loss, double residual_loss, Instant now);
+  [[nodiscard]] std::optional<FecPlan> note_peer_loss(PeerId peer, double raw_loss,
+                                                      double residual_loss, bool rtt_inflated,
+                                                      Instant now);
 
-  [[nodiscard]] FecMode peer_fec_mode(PeerId peer) const noexcept;
+  [[nodiscard]] FecPlan peer_fec_plan(PeerId peer) const noexcept;
 
   using LossReportHandler = std::function<void(PeerId, double, double)>;
   void set_loss_report_handler(LossReportHandler handler) {
@@ -239,9 +242,12 @@ class Worker {
     std::size_t length{};
     Endpoint destination{};
     std::size_t sealed{};
+    std::size_t fec{kNoFec};
     bool ok{};
   };
+  static constexpr std::size_t kNoFec = static_cast<std::size_t>(-1);
   std::vector<std::vector<std::byte>> transmit_plain_;
+  std::vector<std::vector<std::byte>> parity_slots_;
   std::vector<TransmitJob> transmit_jobs_;
 
   struct ReceiveJob {
@@ -267,6 +273,11 @@ class Worker {
     FecEncoder encoder;
     Instant last_symbol{};
     AdaptiveFec controller{};
+    std::uint64_t packets{};
+    std::uint64_t packets_at_report{};
+    std::uint64_t send_failures_at_report{};
+    std::uint64_t sent_at_report{};
+    Instant last_report{};
   };
   struct FecSource {
     Endpoint source{};
@@ -276,6 +287,8 @@ class Worker {
   static constexpr std::size_t kMaximumFecSources = 256;
 
   [[nodiscard]] FecPeer& fec_peer(PeerId peer, const Endpoint& destination);
+  [[nodiscard]] std::size_t fec_index(PeerId peer, const Endpoint& destination);
+  void send_parity(FecPeer& entry, std::span<const std::vector<std::byte>> parity);
   [[nodiscard]] FecSource& fec_source(const Endpoint& source, Instant now);
   std::size_t send_all(std::span<const OutboundDatagram> datagrams);
 

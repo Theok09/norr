@@ -116,6 +116,7 @@ class Session {
   struct LossSample {
     double raw{};
     double residual{};
+    std::uint64_t expected{};
   };
 
   [[nodiscard]] std::optional<LossSample> take_loss_sample() noexcept;
@@ -145,6 +146,7 @@ class Session {
   std::uint64_t sample_base_{};
   std::uint64_t sample_received_{};
   std::uint64_t sample_recovered_{};
+  std::uint64_t sample_late_{};
   bool sample_primed_{};
 
   std::unique_ptr<std::mutex> guard_{std::make_unique<std::mutex>()};

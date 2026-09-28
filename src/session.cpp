@@ -105,6 +105,7 @@ std::expected<void, SessionError> Session::commit(std::uint64_t counter) {
     case ReplayResult::accepted: break;
     case ReplayResult::replayed:
       ++stats_.replay_drops;
+      ++sample_late_;
       return std::unexpected(SessionError::replayed);
     case ReplayResult::too_old:
       ++stats_.too_old_drops;
@@ -147,20 +148,24 @@ std::optional<Session::LossSample> Session::take_loss_sample() noexcept {
     sample_base_ = highest;
     sample_received_ = 0;
     sample_recovered_ = 0;
+    sample_late_ = 0;
     return std::nullopt;
   }
   const auto expected = highest > sample_base_ ? highest - sample_base_ : 0;
   if (expected < 64) return std::nullopt;
-  const auto direct = sample_received_ > sample_recovered_ ? sample_received_ - sample_recovered_ : 0;
+  const auto late = std::min(sample_late_, sample_recovered_);
+  const auto direct = sample_received_ - sample_recovered_ + late;
   const auto fraction_missing = [&](std::uint64_t arrived) {
     return arrived >= expected ? 0.0
                                : 1.0 - static_cast<double>(arrived) / static_cast<double>(expected);
   };
   const LossSample sample{.raw = fraction_missing(direct),
-                          .residual = fraction_missing(sample_received_)};
+                          .residual = fraction_missing(sample_received_),
+                          .expected = expected};
   sample_base_ = highest;
   sample_received_ = 0;
   sample_recovered_ = 0;
+  sample_late_ = 0;
   return sample;
 }
 
