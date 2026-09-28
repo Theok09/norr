@@ -103,5 +103,4 @@ class TrafficKeys {
 [[nodiscard]] std::expected<TrafficKey, CryptoError> derive_traffic_key(
     std::span<const std::byte> handshake_secret, std::string_view domain, KeyDirection direction,
     KeyGeneration generation) noexcept;
-
 }

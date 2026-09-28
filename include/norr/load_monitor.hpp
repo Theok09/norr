@@ -83,5 +83,4 @@ class LoadMonitor {
 
   std::uint64_t transitions_{};
 };
-
 }

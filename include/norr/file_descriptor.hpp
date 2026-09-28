@@ -39,5 +39,4 @@ class FileDescriptor {
  private:
   int descriptor_{kInvalid};
 };
-
 }

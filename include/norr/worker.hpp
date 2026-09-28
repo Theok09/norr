@@ -12,6 +12,8 @@
 #include <vector>
 
 #include "norr/ip_packet.hpp"
+#include "norr/offload.hpp"
+#include "norr/parallel.hpp"
 #include "norr/pacer.hpp"
 #include "norr/qos.hpp"
 #include "norr/routing.hpp"
@@ -92,6 +94,12 @@ class Worker {
   Worker(TunDevice& tun, Carrier& carrier, RoutingTable& routes, SessionTable& sessions);
 
   void set_carrier(Carrier& carrier) noexcept { transport_ = &carrier; }
+
+  void set_mtu(std::size_t mtu);
+  [[nodiscard]] std::size_t mtu() const noexcept { return mtu_; }
+
+  using SessionRequest = std::function<void(PeerId)>;
+  void set_session_request(SessionRequest request) { session_request_ = std::move(request); }
   [[nodiscard]] Carrier& carrier() const noexcept { return *transport_; }
 
   [[nodiscard]] std::size_t pump_tun_to_udp(std::size_t max_frames = 64);
@@ -104,21 +112,12 @@ class Worker {
 
   void enable_queueing(double bytes_per_second, std::size_t burst_bytes, Instant now);
 
-  // Turns forward error correction on for outbound traffic.
-  //
-  // Each sealed packet carries a FEC header naming its block and index, and a
-  // parity symbol follows every complete block. A receiver that loses one
-  // symbol of a block reconstructs it from the parity instead of waiting for a
-  // retransmission that a tunnel cannot provide.
-  //
-  // Off by default: on a clean path the header and the parity are pure
-  // overhead, which is why `mode_for_loss` exists to choose a block size from
-  // measured loss rather than from a guess.
   void enable_fec(FecMode mode);
 
-  [[nodiscard]] FecMode fec_mode() const noexcept { return encoder_.mode(); }
-  [[nodiscard]] const FecStats& fec_stats() const noexcept { return encoder_.stats(); }
-  [[nodiscard]] const FecStats& fec_decode_stats() const noexcept { return decoder_.stats(); }
+  [[nodiscard]] FecMode fec_mode() const noexcept { return fec_mode_; }
+  [[nodiscard]] const FecStats& fec_stats() const noexcept;
+  [[nodiscard]] const FecStats& fec_decode_stats() const noexcept;
+  [[nodiscard]] bool fec_pending() const noexcept;
 
   void set_traffic_profile(TrafficProfile profile) noexcept { profile_ = profile; }
 
@@ -132,32 +131,23 @@ class Worker {
   [[nodiscard]] const Scheduler& scheduler() const noexcept { return scheduler_; }
   [[nodiscard]] const Pacer& pacer() const noexcept { return pacer_; }
 
-  // Applies a rate chosen by congestion control. Only meaningful while
-  // queueing is enabled; without a queue there is nothing to pace.
   void set_pacing_rate(double bytes_per_second) noexcept {
     if (queueing_enabled_) pacer_.set_rate_bytes_per_second(bytes_per_second);
   }
 
-  // Bytes the datapath has put on the wire and bytes it failed to, which is
-  // what congestion control reads as delivered and lost.
   [[nodiscard]] std::uint64_t bytes_sent() const noexcept { return bytes_sent_; }
   [[nodiscard]] std::uint64_t bytes_dropped() const noexcept { return bytes_dropped_; }
 
   std::size_t flush(Instant now) {
+    flush_tun_writes();
     flush_fec(now);
     return drain_queue(now);
   }
 
-  // Called when a control frame arrives carrying an echo request, with the
-  // peer it came from and the opaque token to send back. Echoing is the
-  // runtime's job because only it owns the carrier.
   using EchoResponder = std::function<void(PeerId, std::span<const std::byte>)>;
 
   void set_echo_responder(EchoResponder responder) { echo_responder_ = std::move(responder); }
 
-  // Called when an echo reply arrives, with the token that was sent and the
-  // peer that returned it. The round trip it measures is the only real RTT
-  // signal the datapath has.
   using EchoReplyHandler = std::function<void(PeerId, std::span<const std::byte>)>;
 
   void set_echo_reply_handler(EchoReplyHandler handler) {
@@ -177,20 +167,37 @@ class Worker {
 
   [[nodiscard]] DropReason forward_from_tun(std::span<const std::byte> frame);
 
+  std::size_t flush_transmit();
+
   [[nodiscard]] DropReason forward_from_transport(const Endpoint& source,
                                                   std::span<const std::byte> datagram);
 
-  // Processes one sealed packet, with any FEC framing already removed.
   [[nodiscard]] DropReason forward_sealed(const Endpoint& source,
-                                          std::span<const std::byte> datagram);
+                                          std::span<const std::byte> datagram,
+                                          bool recovered = false);
+
+  void note_peer_loss(PeerId peer, double raw_loss, double residual_loss, Instant now);
+
+  [[nodiscard]] FecMode peer_fec_mode(PeerId peer) const noexcept;
+
+  using LossReportHandler = std::function<void(PeerId, double, double)>;
+  void set_loss_report_handler(LossReportHandler handler) {
+    loss_report_handler_ = std::move(handler);
+  }
 
  private:
 
   [[nodiscard]] std::size_t drain_queue(Instant now);
 
-  // Ships the parity for a block that stopped filling, and drops decoder blocks
-  // whose missing symbol is never going to arrive. Without this the last few
-  // packets of any flow are unprotected and the decoder holds them forever.
+  [[nodiscard]] DropReason route_from_tun(std::span<const std::byte> frame, bool batch);
+
+  [[nodiscard]] DropReason deliver_opened(PeerId ingress_peer, FrameType type,
+                                          std::span<const std::byte> padded_plaintext, bool stable);
+
+  [[nodiscard]] bool stage_receive(const Endpoint& source, std::span<const std::byte> datagram);
+
+  std::size_t settle_receive();
+
   void flush_fec(Instant now);
 
   TunDevice* tun_;
@@ -217,16 +224,69 @@ class Worker {
 
   IngressFilter ingress_filter_;
   ProvisionalOpener provisional_opener_;
+  SessionRequest session_request_;
+
+  std::size_t mtu_{kDefaultTunnelMtu};
+  std::vector<std::byte> segment_scratch_;
+  TcpCoalescer coalescer_;
+  void flush_tun_writes();
+  std::vector<std::vector<std::byte>> transmit_slots_;
+  std::vector<OutboundDatagram> transmit_batch_;
+
+  struct TransmitJob {
+    std::shared_ptr<Session> session;
+    std::uint64_t counter{};
+    std::size_t length{};
+    Endpoint destination{};
+    std::size_t sealed{};
+    bool ok{};
+  };
+  std::vector<std::vector<std::byte>> transmit_plain_;
+  std::vector<TransmitJob> transmit_jobs_;
+
+  struct ReceiveJob {
+    std::shared_ptr<Session> session;
+    PacketView view{};
+    std::span<const std::byte> datagram;
+    Endpoint source{};
+    std::size_t length{};
+    SessionError error{};
+    bool ok{};
+  };
+  std::vector<std::vector<std::byte>> receive_plain_;
+  std::vector<ReceiveJob> receive_jobs_;
+
+  ParallelRunner runner_;
   EchoResponder echo_responder_;
   EchoReplyHandler echo_reply_handler_;
+  LossReportHandler loss_report_handler_;
 
-  FecEncoder encoder_;
-  FecDecoder decoder_;
+  struct FecPeer {
+    PeerId peer{kNoPeer};
+    Endpoint destination{};
+    FecEncoder encoder;
+    Instant last_symbol{};
+    AdaptiveFec controller{};
+  };
+  struct FecSource {
+    Endpoint source{};
+    FecDecoder decoder;
+    Instant last_seen{};
+  };
+  static constexpr std::size_t kMaximumFecSources = 256;
+
+  [[nodiscard]] FecPeer& fec_peer(PeerId peer, const Endpoint& destination);
+  [[nodiscard]] FecSource& fec_source(const Endpoint& source, Instant now);
+  std::size_t send_all(std::span<const OutboundDatagram> datagrams);
+
+  FecMode fec_mode_{FecMode::off};
+  std::vector<FecPeer> fec_peers_;
+  std::vector<FecSource> fec_sources_;
   std::vector<std::byte> fec_buffer_;
-  Instant last_fec_symbol_{};
-  Endpoint fec_destination_{};
+  std::vector<OutboundDatagram> fec_batch_;
+  mutable FecStats fec_encode_total_{};
+  mutable FecStats fec_decode_total_{};
 
   WorkerStats stats_{};
 };
-
 }

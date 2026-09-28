@@ -3,12 +3,18 @@
 #include "norr/crypto.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 
 #include "norr/blake2s.hpp"
 
 #if defined(NORR_HAVE_LIBSODIUM)
 #include <sodium.h>
+#endif
+
+#if defined(NORR_HAVE_OPENSSL) && defined(NORR_HAVE_LIBSODIUM)
+#include <openssl/evp.h>
+#define NORR_AEAD_OPENSSL 1
 #endif
 
 namespace norr {
@@ -24,6 +30,58 @@ namespace {
 }
 #endif
 
+#if defined(NORR_AEAD_OPENSSL)
+class AeadContexts {
+ public:
+  AeadContexts() : cipher_(EVP_CIPHER_fetch(nullptr, "ChaCha20-Poly1305", nullptr)) {}
+
+  AeadContexts(const AeadContexts&) = delete;
+  AeadContexts& operator=(const AeadContexts&) = delete;
+
+  ~AeadContexts() {
+    for (auto& entry : entries_) {
+      if (entry.context != nullptr) EVP_CIPHER_CTX_free(entry.context);
+    }
+    if (cipher_ != nullptr) EVP_CIPHER_free(cipher_);
+  }
+
+  EVP_CIPHER_CTX* get(const TrafficKey& key, bool encrypt) noexcept {
+    if (cipher_ == nullptr) return nullptr;
+    for (auto& entry : entries_) {
+      if (entry.context != nullptr && entry.encrypt == encrypt && entry.key == key) return entry.context;
+    }
+    auto& victim = entries_[next_];
+    next_ = (next_ + 1) % entries_.size();
+    if (victim.context == nullptr) victim.context = EVP_CIPHER_CTX_new();
+    if (victim.context == nullptr) return nullptr;
+    if (EVP_CipherInit_ex(victim.context, cipher_, nullptr,
+                          reinterpret_cast<const unsigned char*>(key.data()), nullptr,
+                          encrypt ? 1 : 0) != 1) {
+      victim.key = {};
+      return nullptr;
+    }
+    victim.key = key;
+    victim.encrypt = encrypt;
+    return victim.context;
+  }
+
+ private:
+  struct Entry {
+    TrafficKey key{};
+    bool encrypt{};
+    EVP_CIPHER_CTX* context{};
+  };
+
+  EVP_CIPHER* cipher_{};
+  std::array<Entry, 8> entries_{};
+  std::size_t next_{};
+};
+
+AeadContexts& aead_contexts() {
+  thread_local AeadContexts contexts;
+  return contexts;
+}
+#endif
 }
 
 bool crypto_available() noexcept {
@@ -187,6 +245,27 @@ std::expected<std::size_t, CryptoError> TrafficKeys::seal(
   }
 
   const auto nonce = aead_nonce(counter);
+#if defined(NORR_AEAD_OPENSSL)
+  if (auto* context = aead_contexts().get(key_, true); context != nullptr) {
+    int length = 0;
+    const auto* iv = reinterpret_cast<const unsigned char*>(nonce.data());
+    auto* target = reinterpret_cast<unsigned char*>(out.data());
+    const bool sealed =
+        EVP_CipherInit_ex(context, nullptr, nullptr, nullptr, iv, 1) == 1 &&
+        (associated_data.empty() ||
+         EVP_CipherUpdate(context, nullptr, &length,
+                          reinterpret_cast<const unsigned char*>(associated_data.data()),
+                          static_cast<int>(associated_data.size())) == 1) &&
+        EVP_CipherUpdate(context, target, &length,
+                         reinterpret_cast<const unsigned char*>(plaintext.data()),
+                         static_cast<int>(plaintext.size())) == 1 &&
+        EVP_CipherFinal_ex(context, target + length, &length) == 1 &&
+        EVP_CIPHER_CTX_ctrl(context, EVP_CTRL_AEAD_GET_TAG, static_cast<int>(kAeadTagSize),
+                            target + plaintext.size()) == 1;
+    if (!sealed) return std::unexpected(CryptoError::authentication_failed);
+    return plaintext.size() + kAeadTagSize;
+  }
+#endif
   unsigned long long written = 0;
   if (crypto_aead_chacha20poly1305_ietf_encrypt(
           reinterpret_cast<unsigned char*>(out.data()), &written,
@@ -208,6 +287,33 @@ std::expected<std::size_t, CryptoError> TrafficKeys::open(
   }
 
   const auto nonce = aead_nonce(counter);
+#if defined(NORR_AEAD_OPENSSL)
+  if (auto* context = aead_contexts().get(key_, false); context != nullptr) {
+    const auto body = ciphertext.size() - kAeadTagSize;
+    int length = 0;
+    auto* target = reinterpret_cast<unsigned char*>(out.data());
+    std::array<unsigned char, kAeadTagSize> tag{};
+    std::memcpy(tag.data(), ciphertext.data() + body, kAeadTagSize);
+    const bool opened =
+        EVP_CipherInit_ex(context, nullptr, nullptr, nullptr,
+                          reinterpret_cast<const unsigned char*>(nonce.data()), 0) == 1 &&
+        (associated_data.empty() ||
+         EVP_CipherUpdate(context, nullptr, &length,
+                          reinterpret_cast<const unsigned char*>(associated_data.data()),
+                          static_cast<int>(associated_data.size())) == 1) &&
+        EVP_CipherUpdate(context, target, &length,
+                         reinterpret_cast<const unsigned char*>(ciphertext.data()),
+                         static_cast<int>(body)) == 1 &&
+        EVP_CIPHER_CTX_ctrl(context, EVP_CTRL_AEAD_SET_TAG, static_cast<int>(kAeadTagSize),
+                            tag.data()) == 1 &&
+        EVP_CipherFinal_ex(context, target + length, &length) == 1;
+    if (!opened) {
+      secure_zero(out.first(std::min(out.size(), body)));
+      return std::unexpected(CryptoError::authentication_failed);
+    }
+    return body;
+  }
+#endif
   unsigned long long written = 0;
   if (crypto_aead_chacha20poly1305_ietf_decrypt(
           reinterpret_cast<unsigned char*>(out.data()), &written, nullptr,
@@ -222,5 +328,4 @@ std::expected<std::size_t, CryptoError> TrafficKeys::open(
 }
 
 #endif
-
 }

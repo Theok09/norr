@@ -70,8 +70,6 @@ class Path {
 
   [[nodiscard]] double score() const noexcept { return score_; }
 
-  // Records that this path stopped working, for a path that is no longer
-  // sampled because it is no longer the active one.
   void mark_failed() noexcept {
     state_ = PathState::failed;
     good_ = 0;
@@ -104,9 +102,6 @@ class PathSelector {
 
   void add_path(TransportKind kind);
 
-  // Names the path that is actually carrying traffic. add_path adopts the
-  // first path added, which is not necessarily the carrier the runtime
-  // installed.
   void set_active(TransportKind kind);
 
   void observe(TransportKind kind, const PathSample& sample);
@@ -131,5 +126,4 @@ class PathSelector {
   bool has_active_{};
   SelectorStats stats_{};
 };
-
 }

@@ -51,7 +51,6 @@ struct BenchResult {
   [[nodiscard]] double operations_per_second() const noexcept;
   [[nodiscard]] double gigabits_per_second() const noexcept;
   [[nodiscard]] double nanoseconds_per_operation() const noexcept;
-
 };
 
 template <typename Body>
@@ -87,5 +86,4 @@ struct GateAResult {
     return packets_intact && replay_rejected && memory_stable;
   }
 };
-
 }

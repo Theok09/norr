@@ -75,5 +75,4 @@ class GlobalLimiter {
  private:
   TokenBucket bucket_;
 };
-
 }

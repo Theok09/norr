@@ -20,5 +20,4 @@ std::expected<NegotiatedCapabilities, NegotiationError> negotiate_capabilities(
       .enabled = enabled,
   };
 }
-
 }

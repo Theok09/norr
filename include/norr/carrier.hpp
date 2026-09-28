@@ -3,6 +3,7 @@
 #pragma once
 
 #include <cstddef>
+#include <chrono>
 #include <expected>
 #include <memory>
 #include <span>
@@ -62,21 +63,9 @@ class UdpCarrier final : public Carrier {
   UdpTransport* transport_;
 };
 
-// Norr frames over one TLS-protected TCP connection.
-//
-// TCP is a stream, so a carrier over it serves exactly one peer: there is no
-// source address per frame to tell peers apart the way a UDP socket does.
-// Every frame that arrives came from the peer at the other end of this
-// connection, which is what `peer_` reports.
-//
-// TLS is not optional here. Without it the carrier would put Norr frames on
-// the wire in the clear, and while the frames are themselves sealed, the
-// carrier is what a compatibility fallback exists to blend in with.
 class TcpCarrier final : public Carrier {
  public:
-  // Dialing side: connects, then keeps reconnecting with bounded backoff.
-  // The TLS pre-shared key is the peer's own: a second secret would be one
-  // more thing to distribute and get wrong.
+
   TcpCarrier(TcpTransport& transport, const Endpoint& peer, bool dialing,
              const PresharedKey& preshared) noexcept
       : transport_(&transport), peer_(peer), dialing_(dialing), preshared_(preshared) {}
@@ -93,8 +82,6 @@ class TcpCarrier final : public Carrier {
 
   [[nodiscard]] std::size_t max_payload() const noexcept override { return kMaximumTcpFrame; }
 
-  // Drives connect, TLS handshake and reconnect. The caller polls this from
-  // its loop; nothing else advances the connection.
   void poll(Instant now);
 
   [[nodiscard]] bool ready() const noexcept {
@@ -111,15 +98,6 @@ class TcpCarrier final : public Carrier {
   TransportStats stats_{};
 };
 
-// Norr frames inside QUIC DATAGRAM.
-//
-// The socket is shared with QUIC itself: every datagram that arrives is fed to
-// ngtcp2, and what comes back out are the DATAGRAM payloads. Norr's own
-// handshake rides inside those payloads rather than beside them, so the two
-// protocols never contend for the same socket.
-//
-// A node with a configured peer endpoint dials. One without waits for an
-// Initial and answers it, which is what `listening_` selects.
 class QuicCarrier final : public Carrier {
  public:
   QuicCarrier(QuicConnection& connection, UdpTransport& socket, const Endpoint& peer,
@@ -127,8 +105,6 @@ class QuicCarrier final : public Carrier {
       : connection_(&connection), socket_(&socket), peer_(peer), local_(local),
         listening_(listening) {}
 
-  // Drives the QUIC handshake: dials on the initiating side, answers an
-  // Initial on the listening one, and flushes whatever ngtcp2 wants to send.
   void poll();
 
   [[nodiscard]] bool ready() const noexcept { return connection_->established(); }
@@ -154,11 +130,15 @@ class QuicCarrier final : public Carrier {
   UdpTransport* socket_;
   Endpoint peer_;
   Endpoint local_{};
+  static constexpr auto kSetupTimeout = std::chrono::seconds{12};
+  static constexpr auto kRedialDelay = std::chrono::seconds{2};
+
   bool listening_{};
   bool dialed_{};
   bool accepted_{};
+  std::chrono::steady_clock::time_point started_{};
+  std::chrono::steady_clock::time_point next_dial_{};
   std::vector<std::span<const std::byte>> inbox_;
   TransportStats stats_{};
 };
-
 }

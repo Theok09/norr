@@ -3,6 +3,7 @@
 #include "norr/metrics.hpp"
 
 #include <array>
+#include <cerrno>
 #include <cstring>
 
 #if defined(__linux__)
@@ -66,7 +67,6 @@ void labelled_counter(std::string& out, std::string_view name, std::string_view 
     out += '\n';
   }
 }
-
 }
 
 std::string render_prometheus(const MetricsSnapshot& snapshot) {
@@ -140,7 +140,10 @@ std::string render_prometheus(const MetricsSnapshot& snapshot) {
 
 MetricsServer::~MetricsServer() { stop(); }
 
-void MetricsServer::stop() noexcept { socket_.reset(); }
+void MetricsServer::stop() noexcept {
+  clients_.clear();
+  socket_.reset();
+}
 
 #if !defined(__linux__)
 
@@ -209,48 +212,84 @@ std::expected<std::uint16_t, MetricsError> MetricsServer::local_port() const {
   return ntohs(reinterpret_cast<const sockaddr_in6*>(&storage)->sin6_port);
 }
 
+bool MetricsServer::service(Client& client, const MetricsSnapshot& snapshot) {
+  if (!client.answered) {
+    std::array<char, 2048> chunk{};
+    while (client.request.size() < kMaximumRequestBytes) {
+      const auto got = ::recv(client.socket.get(), chunk.data(), chunk.size(), MSG_DONTWAIT);
+      if (got > 0) {
+        client.request.append(chunk.data(), static_cast<std::size_t>(got));
+        continue;
+      }
+      if (got == 0) break;
+      if (errno == EINTR) continue;
+      if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+      return true;
+    }
+
+    const std::string_view seen{client.request};
+    const auto prefix = seen.substr(0, 4);
+    const bool not_get = !prefix.empty() && !std::string_view{"GET "}.starts_with(prefix);
+    const bool complete = seen.find("\r\n\r\n") != std::string_view::npos ||
+                          seen.find("\n\n") != std::string_view::npos ||
+                          client.request.size() >= kMaximumRequestBytes;
+    if (!not_get && !complete) {
+      return std::chrono::steady_clock::now() >= client.deadline;
+    }
+
+    if (!not_get && seen.starts_with("GET ")) {
+      const auto body = render_prometheus(snapshot);
+      client.response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\n";
+      client.response += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+      client.response += "Connection: close\r\n\r\n";
+      client.response += body;
+      ++served_;
+    } else {
+      client.response =
+          "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    }
+    client.answered = true;
+  }
+
+  while (client.written < client.response.size()) {
+    const auto sent = ::send(client.socket.get(), client.response.data() + client.written,
+                             client.response.size() - client.written, MSG_NOSIGNAL | MSG_DONTWAIT);
+    if (sent > 0) {
+      client.written += static_cast<std::size_t>(sent);
+      continue;
+    }
+    if (sent < 0 && errno == EINTR) continue;
+    if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      return std::chrono::steady_clock::now() >= client.deadline;
+    }
+    return true;
+  }
+  return true;
+}
+
 std::size_t MetricsServer::poll(const MetricsSnapshot& snapshot) {
   if (!socket_.valid()) return 0;
 
-  std::size_t handled = 0;
-  for (int index = 0; index < 8; ++index) {
-    FileDescriptor client{::accept4(socket_.get(), nullptr, nullptr, SOCK_CLOEXEC)};
-    if (!client.valid()) break;
-
-    std::array<char, kMaximumRequestBytes> request{};
-    const auto read_bytes = ::recv(client.get(), request.data(), request.size() - 1, 0);
-
-    const bool ok = read_bytes > 0 &&
-                    std::string_view{request.data(), static_cast<std::size_t>(read_bytes)}
-                            .starts_with("GET ");
-
-    std::string response;
-    if (ok) {
-      const auto body = render_prometheus(snapshot);
-      response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\n";
-      response += "Content-Length: " + std::to_string(body.size()) + "\r\n";
-      response += "Connection: close\r\n\r\n";
-      response += body;
-      ++served_;
-    } else {
-      response =
-          "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-    }
-
-    std::size_t written = 0;
-    while (written < response.size()) {
-      const auto sent = ::send(client.get(), response.data() + written,
-                               response.size() - written, MSG_NOSIGNAL);
-      if (sent <= 0) break;
-      written += static_cast<std::size_t>(sent);
-    }
-
-    ++handled;
+  while (clients_.size() < kMaximumClients) {
+    FileDescriptor accepted{
+        ::accept4(socket_.get(), nullptr, nullptr, SOCK_CLOEXEC | SOCK_NONBLOCK)};
+    if (!accepted.valid()) break;
+    clients_.push_back(Client{.socket = std::move(accepted),
+                              .request = {},
+                              .response = {},
+                              .written = 0,
+                              .deadline = std::chrono::steady_clock::now() + kClientDeadline,
+                              .answered = false});
   }
 
+  std::size_t handled = 0;
+  std::erase_if(clients_, [&](Client& client) {
+    const bool finished = service(client, snapshot);
+    if (finished && client.answered) ++handled;
+    return finished;
+  });
   return handled;
 }
 
 #endif
-
 }

@@ -49,7 +49,6 @@ namespace {
 }
 
 #endif
-
 }
 
 bool FrameReassembler::push(std::span<const std::byte> bytes) {
@@ -147,6 +146,18 @@ void TcpReconnector::poll(TcpTransport& transport, Instant now) {
   }
 }
 
+void TcpTransport::set_mark(std::uint32_t mark) noexcept {
+  mark_ = mark;
+  apply_mark();
+}
+
+void TcpTransport::apply_mark() noexcept {
+#if defined(__linux__)
+  if (mark_ == 0 || !socket_.valid()) return;
+  static_cast<void>(::setsockopt(socket_.get(), SOL_SOCKET, SO_MARK, &mark_, sizeof(mark_)));
+#endif
+}
+
 bool TcpTransport::supported() noexcept {
 #if defined(__linux__)
   return true;
@@ -176,6 +187,10 @@ std::expected<std::size_t, TransportError> TcpTransport::send_frame(std::span<co
 
 std::expected<void, TransportError> TcpTransport::enable_tls(TlsRole, std::string_view,
                                                              std::span<const std::byte>) {
+  return std::unexpected(TransportError::unsupported_platform);
+}
+
+std::expected<bool, TransportError> TcpTransport::flush_output() {
   return std::unexpected(TransportError::unsupported_platform);
 }
 
@@ -218,12 +233,17 @@ std::expected<void, TransportError> TcpTransport::connect(const Endpoint& peer) 
   if (!set_non_blocking(descriptor.get())) {
     return std::unexpected(TransportError::socket_option_failed);
   }
+  if (mark_ != 0) {
+    static_cast<void>(
+        ::setsockopt(descriptor.get(), SOL_SOCKET, SO_MARK, &mark_, sizeof(mark_)));
+  }
 
   sockaddr_storage storage{};
   const auto length = fill_sockaddr(peer, storage);
 
   const auto result =
       ::connect(descriptor.get(), reinterpret_cast<const sockaddr*>(&storage), length);
+  outbox_.clear();
   if (result == 0) {
     socket_ = std::move(descriptor);
     state_ = TcpState::connected;
@@ -269,6 +289,44 @@ void TcpTransport::close() noexcept {
   socket_.reset();
   state_ = TcpState::closed;
   reassembler_.reset();
+  outbox_.clear();
+  tls_.reset();
+}
+
+std::expected<std::size_t, TransportError> TcpTransport::write_some(
+    std::span<const std::byte> bytes) {
+  if (tls_.has_value()) {
+    if (!tls_->established()) return std::size_t{0};
+    const auto sent = tls_->send(bytes);
+    if (!sent) {
+      if (sent.error() == TlsError::handshake_pending) return std::size_t{0};
+      state_ = TcpState::failed;
+      return std::unexpected(TransportError::send_failed);
+    }
+    return *sent;
+  }
+
+  while (true) {
+    const auto sent = ::send(socket_.get(), bytes.data(), bytes.size(), MSG_NOSIGNAL);
+    if (sent >= 0) return static_cast<std::size_t>(sent);
+    if (errno == EINTR) continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return std::size_t{0};
+    state_ = TcpState::failed;
+    return std::unexpected(TransportError::send_failed);
+  }
+}
+
+std::expected<bool, TransportError> TcpTransport::flush_output() {
+  if (state_ != TcpState::connected) return std::unexpected(TransportError::not_started);
+  std::size_t offset = 0;
+  while (offset < outbox_.size()) {
+    const auto sent = write_some(std::span{outbox_}.subspan(offset));
+    if (!sent) return std::unexpected(sent.error());
+    if (*sent == 0) break;
+    offset += *sent;
+  }
+  outbox_.erase(outbox_.begin(), outbox_.begin() + static_cast<std::ptrdiff_t>(offset));
+  return outbox_.empty();
 }
 
 std::expected<std::size_t, TransportError> TcpTransport::send_frame(
@@ -277,74 +335,29 @@ std::expected<std::size_t, TransportError> TcpTransport::send_frame(
   if (frame.size() > kMaximumTcpFrame) {
     return std::unexpected(TransportError::message_too_large);
   }
+  if (tls_.has_value() && !tls_->established()) return std::unexpected(TransportError::not_started);
 
-  std::array<std::byte, kTcpLengthPrefixSize> prefix{};
-  prefix[0] = static_cast<std::byte>((frame.size() >> 8U) & 0xFFU);
-  prefix[1] = static_cast<std::byte>(frame.size() & 0xFFU);
+  const auto drained = flush_output();
+  if (!drained) return std::unexpected(drained.error());
+  if (!*drained) return std::unexpected(TransportError::would_block);
 
-  std::array<iovec, 2> vectors{};
-  vectors[0].iov_base = prefix.data();
-  vectors[0].iov_len = prefix.size();
-  vectors[1].iov_base = const_cast<std::byte*>(frame.data());
-  vectors[1].iov_len = frame.size();
+  record_.resize(kTcpLengthPrefixSize + frame.size());
+  record_[0] = static_cast<std::byte>((frame.size() >> 8U) & 0xFFU);
+  record_[1] = static_cast<std::byte>(frame.size() & 0xFFU);
+  std::copy(frame.begin(), frame.end(), record_.begin() + kTcpLengthPrefixSize);
 
-  const auto total = prefix.size() + frame.size();
   std::size_t written = 0;
-
-  if (tls_.has_value()) {
-    if (!tls_->established()) return std::unexpected(TransportError::not_started);
-
-    std::vector<std::byte> record;
-    record.reserve(total);
-    record.insert(record.end(), prefix.begin(), prefix.end());
-    record.insert(record.end(), frame.begin(), frame.end());
-
-    while (written < total) {
-      const auto sent = tls_->send(std::span{record}.subspan(written));
-      if (!sent) {
-        if (sent.error() == TlsError::handshake_pending) {
-          return std::unexpected(TransportError::would_block);
-        }
-        state_ = TcpState::failed;
-        return std::unexpected(TransportError::send_failed);
-      }
-      if (*sent == 0) return std::unexpected(TransportError::would_block);
-      written += *sent;
-    }
-
-    stats_.bytes_sent += total;
-    ++stats_.frames_sent;
-    return frame.size();
+  while (written < record_.size()) {
+    const auto sent = write_some(std::span{record_}.subspan(written));
+    if (!sent) return std::unexpected(sent.error());
+    if (*sent == 0) break;
+    written += *sent;
+  }
+  if (written < record_.size()) {
+    outbox_.assign(record_.begin() + static_cast<std::ptrdiff_t>(written), record_.end());
   }
 
-  while (written < total) {
-    if (written < prefix.size()) {
-      vectors[0].iov_base = prefix.data() + written;
-      vectors[0].iov_len = prefix.size() - written;
-      vectors[1].iov_base = const_cast<std::byte*>(frame.data());
-      vectors[1].iov_len = frame.size();
-      const auto sent = ::writev(socket_.get(), vectors.data(), 2);
-      if (sent < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return std::unexpected(TransportError::would_block);
-        if (errno == EINTR) continue;
-        state_ = TcpState::failed;
-        return std::unexpected(TransportError::send_failed);
-      }
-      written += static_cast<std::size_t>(sent);
-    } else {
-      const auto offset = written - prefix.size();
-      const auto sent = ::write(socket_.get(), frame.data() + offset, frame.size() - offset);
-      if (sent < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) return std::unexpected(TransportError::would_block);
-        if (errno == EINTR) continue;
-        state_ = TcpState::failed;
-        return std::unexpected(TransportError::send_failed);
-      }
-      written += static_cast<std::size_t>(sent);
-    }
-  }
-
-  stats_.bytes_sent += total;
+  stats_.bytes_sent += record_.size();
   ++stats_.frames_sent;
   return frame.size();
 }
@@ -518,5 +531,4 @@ std::expected<std::uint16_t, TransportError> TcpListener::local_port() const {
 }
 
 #endif
-
 }

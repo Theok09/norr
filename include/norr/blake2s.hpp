@@ -50,5 +50,4 @@ using HmacKey = std::array<std::byte, Blake2s::kMaximumDigestSize>;
 [[nodiscard]] bool hkdf_expand(std::span<const std::byte> pseudorandom_key,
                                std::span<const std::byte> info,
                                std::span<std::byte> out) noexcept;
-
 }

@@ -1,0 +1,17 @@
+[Unit]
+Description=Norr tunnel %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+PIDFile=/run/norr-%i.pid
+Environment=NORR=/usr/local/bin/norrd
+ExecStart=/usr/local/lib/norr/norr-quick up %i
+ExecStop=/usr/local/lib/norr/norr-quick down %i
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

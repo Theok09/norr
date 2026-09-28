@@ -29,5 +29,4 @@ class ReplayWindow {
   std::uint64_t highest_{};
   std::array<std::uint64_t, kWordCount> seen_{};
 };
-
 }

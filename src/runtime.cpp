@@ -6,6 +6,11 @@
 #include <chrono>
 #include <fstream>
 #include <optional>
+#include <vector>
+
+#if defined(__linux__)
+#include <poll.h>
+#endif
 #include <thread>
 
 #include "norr/address.hpp"
@@ -33,7 +38,6 @@ using Diagnostic = RuntimeDiagnostic;
   if (datagram.empty()) return false;
   return static_cast<std::uint8_t>(datagram[0]) < 0x10U;
 }
-
 }
 
 bool decode_hex(std::string_view text, std::span<std::byte> out) noexcept {
@@ -80,7 +84,6 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
     return std::unexpected(Diagnostic{RuntimeError::crypto_unavailable, {}});
   }
 
-
   const auto private_key = load_private_key(config.identity_key_file);
   if (!private_key) {
     return std::unexpected(Diagnostic{private_key.error(), config.identity_key_file});
@@ -91,17 +94,21 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
   }
   local_static_ = KeyPair{.public_key = *public_key, .private_key = *private_key};
 
-  if (const auto opened = tun_.open(config.tun_name, true, false); !opened) {
+  if (const auto opened = tun_.open(config.tun_name, true, false, config.network.offload); !opened) {
     return std::unexpected(Diagnostic{RuntimeError::tun_failed,
                                       std::string{tun_error_message(opened.error())}});
   }
 
+  std::size_t tunnel_mtu = kDefaultTunnelMtu;
   if (config.network.mtu != kAutomaticMtu) {
     if (const auto applied = tun_.set_mtu(config.network.mtu); !applied) {
       return std::unexpected(Diagnostic{RuntimeError::tun_failed,
                                         "network.mtu: " +
                                             std::string{tun_error_message(applied.error())}});
     }
+    tunnel_mtu = config.network.mtu;
+  } else if (!tun_.set_mtu(static_cast<std::uint16_t>(kDefaultTunnelMtu))) {
+    if (const auto current = tun_.mtu(); current) tunnel_mtu = *current;
   }
 
   const auto bind_text = (config.network.ipv6 ? std::string{"[::]:"} : std::string{"0.0.0.0:"}) +
@@ -114,15 +121,29 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
     return std::unexpected(Diagnostic{RuntimeError::bind_failed,
                                       std::string{transport_error_message(bound.error())}});
   }
+  fwmark_ = config.network.fwmark;
+  if (fwmark_ != 0) {
+    if (const auto marked = transport_.set_mark(fwmark_); !marked) {
+      return std::unexpected(Diagnostic{RuntimeError::bind_failed,
+                                        "network.fwmark: " +
+                                            std::string{transport_error_message(marked.error())}});
+    }
+    tcp_.set_mark(fwmark_);
+  }
 
   control_ = std::make_unique<ControlPlane>(local_static_, sessions_, timers_);
 
   for (const auto& text : config.network.addresses) {
     const auto prefix = parse_prefix(text);
-    if (!prefix) {
+    const auto host = parse_address(std::string_view{text}.substr(0, text.find('/')));
+    if (!prefix || !host) {
       return std::unexpected(Diagnostic{RuntimeError::peer_prefix_malformed, text});
     }
-    if (const auto added = routes_.add_local(*prefix); !added) {
+    const auto own = Prefix::create(*host, maximum_prefix_length(host->family()));
+    if (!own) {
+      return std::unexpected(Diagnostic{RuntimeError::peer_prefix_malformed, text});
+    }
+    if (const auto added = routes_.add_local(*own); !added) {
       return std::unexpected(Diagnostic{RuntimeError::routing_conflict,
                                         text + ": " +
                                             std::string{routing_error_message(added.error())}});
@@ -171,8 +192,6 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
   listen_port_ = config.listen_port;
 
   if (config.transport == TransportMode::quic) {
-    // QUIC carries a connection between two endpoints, like TCP: one peer per
-    // carrier. The node with a configured endpoint dials, the other answers.
     const PeerConfig* partner = nullptr;
     for (PeerId peer = 1; peer <= peer_count_; ++peer) {
       const auto* candidate = control_->find_peer(peer);
@@ -209,8 +228,6 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
     carrier_ = quic_carrier_.get();
     active_kind_ = TransportKind::quic;
   } else if (config.transport == TransportMode::tcp_tls) {
-    // TCP carries a stream between exactly two endpoints, so the carrier binds
-    // to one peer. A node with a configured endpoint dials; one without listens.
     const PeerConfig* partner = nullptr;
     for (PeerId peer = 1; peer <= peer_count_; ++peer) {
       const auto* candidate = control_->find_peer(peer);
@@ -253,18 +270,9 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
     active_kind_ = TransportKind::udp;
   }
 
-  // "auto" builds every carrier this configuration and build can support, so a
-  // path that stops working can be abandoned for one that still does. A named
-  // mode builds only that one: an operator who asked for QUIC did not ask to
-  // be moved off it.
   if (config.transport == TransportMode::automatic && peer_count_ == 1) {
     const auto* partner = control_->find_peer(1);
 
-    // A connection-oriented carrier needs one side to dial and the other to
-    // answer. Both sides of an automatic pair usually know each other's
-    // endpoint, so the endpoint cannot decide which is which - the role does.
-    // Without this both nodes dial and neither listens, and the fallback
-    // carriers never connect at all.
     const bool dials = config.role == NodeRole::client;
     const auto far = partner != nullptr && partner->endpoint.has_value()
                          ? *partner->endpoint
@@ -292,9 +300,7 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
     }
     if (tcp_carrier_ != nullptr || quic_carrier_ != nullptr) {
       paths_.add_path(TransportKind::udp);
-      // add_path makes the first path added the active one, and the fallbacks
-      // were added first. The selector has to agree with the carrier actually
-      // installed or its very first evaluation reads the wrong path's health.
+
       paths_.set_active(TransportKind::udp);
       automatic_fallback_ = true;
       last_path_check_ = std::chrono::steady_clock::now();
@@ -302,12 +308,19 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
   }
 
   worker_ = std::make_unique<Worker>(tun_, *carrier_, routes_, sessions_);
+  worker_->set_mtu(tunnel_mtu);
+  worker_->set_session_request([this](PeerId peer) { request_session(peer); });
 
   worker_->set_echo_responder(
       [this](PeerId peer, std::span<const std::byte> token) { answer_echo(peer, token); });
   worker_->set_echo_reply_handler(
       [this](PeerId peer, std::span<const std::byte> token) { note_echo_reply(peer, token); });
 
+  worker_->set_loss_report_handler(
+      [this](PeerId peer, double raw, double residual) {
+        worker_->note_peer_loss(peer, raw, residual, std::chrono::steady_clock::now());
+      });
+  fec_configured_ = config.fec != FecMode::off;
   if (config.fec != FecMode::off) {
     worker_->enable_fec(config.fec);
   }
@@ -320,9 +333,6 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
     worker_->enable_queueing(static_cast<double>(config.qos_rate_bytes),
                              config.qos_burst_bytes, std::chrono::steady_clock::now());
 
-    // The configured rate is the ceiling an operator asked for, and the
-    // starting point. Congestion control moves the actual rate below it when
-    // the path says so, and never above it.
     CongestionConfig tuning{};
     tuning.maximum_rate_bytes = static_cast<double>(config.qos_rate_bytes);
     congestion_ = CongestionController{tuning, static_cast<double>(config.qos_rate_bytes)};
@@ -367,7 +377,6 @@ std::expected<std::size_t, RuntimeDiagnostic> Runtime::reload(const std::string&
                                           (problem.detail.empty() ? "" : " (" + problem.detail + ")")});
   }
 
-  // Refuse what cannot change without recreating the device or the socket.
   if (config->tun_name != tun_.name()) {
     return std::unexpected(Diagnostic{RuntimeError::option_not_implemented,
                                       "node.tun cannot change on reload"});
@@ -386,8 +395,6 @@ std::expected<std::size_t, RuntimeDiagnostic> Runtime::reload(const std::string&
                                       "framing symbols the old way"});
   }
 
-  // Decode everything before changing anything, so a malformed file leaves the
-  // running configuration untouched.
   struct Incoming {
     PeerConfig peer;
     std::vector<Prefix> prefixes;
@@ -421,8 +428,6 @@ std::expected<std::size_t, RuntimeDiagnostic> Runtime::reload(const std::string&
     incoming.push_back(std::move(next));
   }
 
-  // A peer is identified by its static key, not by its position in the file,
-  // so one that is still present keeps its id and its live session.
   std::unordered_map<PeerId, bool> still_present;
   for (PeerId peer = 1; peer <= peer_count_; ++peer) still_present[peer] = false;
 
@@ -481,9 +486,6 @@ void Runtime::send_outgoing(const OutgoingHandshake& outgoing) {
                                   .payload = outgoing.datagram};
   const std::array<OutboundDatagram, 1> batch{datagram};
 
-  // Handshakes travel over whichever carrier is active. Writing to the raw UDP
-  // socket instead would work only when UDP is the carrier, and silently send
-  // into nowhere when it is not.
   static_cast<void>(carrier_->send_batch(batch));
 }
 
@@ -502,9 +504,6 @@ void Runtime::send_control(PeerId peer, std::span<const std::byte> payload) {
 }
 
 void Runtime::send_keepalive(PeerId peer) {
-  // The keepalive doubles as an echo request. A separate probe would be one
-  // more thing on the wire measuring itself; this measures the path that
-  // traffic actually takes, on a packet that was being sent anyway.
   const auto now = std::chrono::steady_clock::now();
   const auto stamp = static_cast<std::uint64_t>(
       std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count());
@@ -540,9 +539,6 @@ void Runtime::note_echo_reply(PeerId peer, std::span<const std::byte> token) {
   const auto elapsed =
       std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()) - sent_at;
 
-  // A token that did not come from this process, or one from before a clock
-  // adjustment, would read as a nonsensical round trip. Those are dropped
-  // rather than smeared into the estimate.
   if (elapsed.count() <= 0 || elapsed > kMaximumPlausibleRtt) return;
 
   last_rtt_ = elapsed;
@@ -559,6 +555,7 @@ void Runtime::service_tcp_carrier(Instant now) {
     auto incoming = tcp_listener_.accept();
     if (incoming && incoming->has_value()) {
       tcp_ = std::move(**incoming);
+      tcp_.set_mark(fwmark_);
     }
   }
 
@@ -568,9 +565,6 @@ void Runtime::service_tcp_carrier(Instant now) {
   tcp_carrier->poll(now);
   tcp_ready_ = tcp_carrier->ready();
 
-  // A TCP carrier has nowhere to send until the connection and its TLS
-  // handshake are up, so the Noise handshake waits for that rather than being
-  // dialled at startup and silently dropped.
   if (tcp_ready_ && !was_ready) {
     static_cast<void>(dial_configured_peers());
   }
@@ -586,23 +580,15 @@ void Runtime::service_quic_carrier() {
   quic_carrier->poll();
   quic_ready_ = quic_carrier->ready();
 
-  // Nothing can be sent until QUIC itself is established, so the Noise
-  // handshake waits for that rather than being dialled into a connection that
-  // does not exist yet.
   if (quic_ready_ && !was_ready) {
     static_cast<void>(dial_configured_peers());
   }
 }
 
 void Runtime::apply_congestion_control(Instant now) {
-  // Congestion control only has anything to act on when the datapath is
-  // shaping. Without a queue there is no rate to lower and nothing to pace.
   if (!congestion_enabled_ || worker_ == nullptr || !worker_->queueing_enabled()) return;
   if (now - last_congestion_sample_ < kCongestionSampleInterval) return;
 
-  // A round trip is the input the controller cannot do without: it separates
-  // a queue that is filling from a path that is merely busy. Until the first
-  // echo completes there is nothing honest to feed it.
   if (last_rtt_.count() <= 0) return;
 
   const auto interval = last_congestion_sample_ == Instant{}
@@ -627,19 +613,11 @@ void Runtime::apply_congestion_control(Instant now) {
 void Runtime::evaluate_transport_paths(Instant now) {
   if (!automatic_fallback_) return;
 
-  // A carrier that was just selected has not had time to connect: TCP has a
-  // handshake and so does TLS, and QUIC has both. Judging it before it can
-  // finish means abandoning it mid-handshake and moving to the next one, which
-  // never settles anywhere. Nothing is evaluated during that window.
   if (switched_at_ != Instant{} && now - switched_at_ < kTransportSettleTime) return;
 
   if (now - last_path_check_ < kTransportCheckInterval) return;
   last_path_check_ = now;
 
-  // A connection-oriented carrier that has not finished connecting is not
-  // failing. TCP is still in connect or TLS, QUIC still in its handshake, and
-  // neither can carry a Noise handshake yet. Judging them here would abandon
-  // each one while it was still coming up.
   if (active_kind_ == TransportKind::tcp_tls && tcp_carrier_ != nullptr &&
       !tcp_carrier_->ready()) {
     return;
@@ -649,9 +627,6 @@ void Runtime::evaluate_transport_paths(Instant now) {
     return;
   }
 
-  // Health comes from what the datapath already observes: whether a session is
-  // still hearing from its peer, and whether the carrier is failing to send.
-  // Inventing a probe would measure the probe.
   const auto& transport = carrier_->stats();
   const auto errors = transport.tx_errors + transport.rx_errors;
   const auto new_errors = errors > last_tx_errors_ ? errors - last_tx_errors_ : 0;
@@ -667,11 +642,6 @@ void Runtime::evaluate_transport_paths(Instant now) {
     }
   }
 
-  // Retries are the other failure signal. A started handshake that never
-  // completes looks identical to one still in flight, and dead-peer detection
-  // removes the session before the started/completed gap ever opens - so the
-  // count of retransmitted initiations is what actually distinguishes a
-  // blocked path from an idle one.
   const auto& control = control_->stats();
   const auto attempted = control.handshakes_started;
   const auto retries = control.retries;
@@ -685,18 +655,10 @@ void Runtime::evaluate_transport_paths(Instant now) {
   }
   const auto stalled = consecutive_stalls_ >= kStallsBeforeFallback;
 
-  // Silence on its own is not failure: a tunnel with nothing to carry is
-  // quiet, and condemning it would move a perfectly good carrier. A path is
-  // judged broken only when something is actively failing on it - initiations
-  // being retransmitted, or the carrier refusing to send. This is what keeps
-  // an idle spoke from falling back off a working UDP path.
   const auto failing = stalled || new_errors > 0;
   const auto working = !failing;
   if (!failing && !hearing) return;
-  // A path with no completed echo yet reports zero, which the thresholds treat
-  // as the best possible RTT. That is the right reading for a path that has
-  // not been measured: it is judged on whether it is carrying traffic, not on
-  // a latency nobody has observed.
+
   const auto rtt_microseconds = static_cast<double>(
       std::chrono::duration_cast<std::chrono::microseconds>(last_rtt_).count());
 
@@ -706,8 +668,6 @@ void Runtime::evaluate_transport_paths(Instant now) {
                           .reachable = working};
   paths_.observe(active_kind_, sample);
 
-  // Nothing has been tried yet: a carrier with no traffic at all is not
-  // failing, it is idle.
   if (attempted == 0 && new_errors == 0 && new_retries == 0) return;
   if (working && new_errors == 0) return;
 
@@ -733,12 +693,9 @@ void Runtime::evaluate_transport_paths(Instant now) {
 
   std::fprintf(stderr, "transport: switched to %s\n",
                std::string{transport_kind_name(chosen)}.c_str());
-  // A fallback is the one event an operator is watching for, and stderr to a
-  // file is block buffered: without this it is not visible until exit.
+
   std::fflush(stderr);
 
-  // The peer is reached over a different carrier now, so the session it had is
-  // useless: a new handshake establishes one over the path that works.
   for (PeerId peer = 1; peer <= peer_count_; ++peer) {
     auto session = sessions_.find_by_peer(peer);
     if (session != nullptr) sessions_.remove(session->local_key_id());
@@ -746,28 +703,93 @@ void Runtime::evaluate_transport_paths(Instant now) {
   static_cast<void>(dial_configured_peers());
 }
 
+void Runtime::request_session(PeerId peer) {
+  if (control_ == nullptr || control_->has_pending(peer)) return;
+  if (!control_->dial_endpoint(peer).has_value()) return;
+  const auto outgoing = control_->start_handshake(peer, std::chrono::steady_clock::now());
+  if (outgoing) send_outgoing(*outgoing);
+}
+
 void Runtime::redial_dead_peers(Instant now) {
-  if (now - last_liveness_sweep_ < kKeepaliveInterval) return;
+  if (now - last_liveness_sweep_ < kHandshakeTimeout) return;
   last_liveness_sweep_ = now;
 
   for (PeerId peer = 1; peer <= peer_count_; ++peer) {
     const auto* configured = control_->find_peer(peer);
-    if (configured == nullptr || !configured->endpoint.has_value()) continue;
+    if (configured == nullptr) continue;
+    const bool dials = configured->endpoint.has_value();
 
     auto session = sessions_.find_by_peer(peer);
-    if (session == nullptr) continue;
+    if (session != nullptr) {
+      const auto silent = session->has_received() &&
+                          now - session->last_received() >= kDeadPeerTimeout;
+      if (!silent && !session->expired(now)) continue;
 
-    const auto silent = session->has_received() &&
-                        now - session->last_received() >= kDeadPeerTimeout;
-    if (!silent && !session->expired(now)) continue;
+      sessions_.remove(session->local_key_id());
+      timers_.cancel(TimerKind::rekey, peer);
+      timers_.cancel(TimerKind::keepalive, peer);
+    }
 
-    sessions_.remove(session->local_key_id());
-    timers_.cancel(TimerKind::rekey, peer);
-    timers_.cancel(TimerKind::keepalive, peer);
-
+    if (!dials || control_->has_pending(peer)) continue;
     const auto outgoing = control_->start_handshake(peer, now);
     if (outgoing) send_outgoing(*outgoing);
   }
+}
+
+void Runtime::report_loss(Instant now) {
+  if (!fec_configured_ || now - last_loss_report_ < std::chrono::seconds{1}) return;
+  last_loss_report_ = now;
+  for (PeerId peer = 1; peer <= peer_count_; ++peer) {
+    auto session = sessions_.find_by_peer(peer);
+    if (session == nullptr) continue;
+    const auto loss = session->take_loss_sample();
+    if (!loss) continue;
+    const auto permille = [](double value) {
+      return static_cast<unsigned>(std::min(1.0, value) * 1000.0 + 0.5);
+    };
+    const auto raw = permille(loss->raw);
+    const auto residual = permille(loss->residual);
+    const std::array<std::byte, kLossReportSize> payload{
+        kLossReport, static_cast<std::byte>((raw >> 8U) & 0xFFU),
+        static_cast<std::byte>(raw & 0xFFU), static_cast<std::byte>((residual >> 8U) & 0xFFU),
+        static_cast<std::byte>(residual & 0xFFU)};
+    send_control(peer, payload);
+  }
+}
+
+void Runtime::wait_for_work(Instant now) {
+#if defined(__linux__)
+  std::vector<pollfd> watched;
+  watched.reserve(5);
+  const auto watch = [&](int descriptor) {
+    if (descriptor >= 0) watched.push_back(pollfd{.fd = descriptor, .events = POLLIN, .revents = 0});
+  };
+  watch(tun_.descriptor());
+  watch(transport_.descriptor());
+  if (tcp_.connected()) {
+    watch(tcp_.descriptor());
+    if (tcp_.has_pending_output()) watched.back().events |= POLLOUT;
+  }
+  if (tcp_listener_.listening()) watch(tcp_listener_.descriptor());
+  if (metrics_.listening()) watch(metrics_.descriptor());
+
+  auto timeout = std::chrono::milliseconds{50};
+  if (!timers_.empty()) {
+    const auto until = std::chrono::duration_cast<std::chrono::milliseconds>(timers_.next_due() - now);
+    timeout = std::clamp(until, std::chrono::milliseconds{0}, timeout);
+  }
+  if (worker_->queueing_enabled() && !worker_->scheduler().empty()) {
+    timeout = std::min(timeout, std::chrono::milliseconds{1});
+  }
+  if (worker_->fec_pending()) {
+    timeout = std::min(timeout, std::chrono::duration_cast<std::chrono::milliseconds>(kFecFlushInterval));
+  }
+  static_cast<void>(::poll(watched.data(), static_cast<nfds_t>(watched.size()),
+                           static_cast<int>(timeout.count())));
+#else
+  static_cast<void>(now);
+  std::this_thread::sleep_for(std::chrono::milliseconds{1});
+#endif
 }
 
 void Runtime::service_timers(Instant now) {
@@ -818,6 +840,7 @@ void Runtime::run() {
     service_tcp_carrier(now);
     service_quic_carrier();
     apply_congestion_control(now);
+    report_loss(now);
     evaluate_transport_paths(now);
 
     if (reload_requested_.exchange(false, std::memory_order_relaxed)) {
@@ -842,7 +865,7 @@ void Runtime::run() {
       static_cast<void>(metrics_.poll(snapshot));
     }
 
-    if (!worked) std::this_thread::sleep_for(std::chrono::microseconds(200));
+    if (!worked) wait_for_work(now);
   }
 }
 
@@ -869,5 +892,4 @@ const FecStats& Runtime::fec_decode_stats() const {
   static const FecStats empty{};
   return worker_ ? worker_->fec_decode_stats() : empty;
 }
-
 }

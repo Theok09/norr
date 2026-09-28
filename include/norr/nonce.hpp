@@ -24,5 +24,4 @@ class PacketCounter {
   std::uint64_t value_{};
   bool exhausted_{};
 };
-
 }

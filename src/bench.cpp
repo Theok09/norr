@@ -142,5 +142,4 @@ void print_latency_report(std::string_view name, Samples& samples) {
               samples.percentile(0.95), samples.percentile(0.99), samples.max(),
               samples.stddev());
 }
-
 }

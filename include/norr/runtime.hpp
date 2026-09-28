@@ -74,7 +74,6 @@ class Runtime {
 
   [[nodiscard]] std::expected<void, RuntimeDiagnostic> start(const Config& config);
 
-  // Remembers where the configuration came from, so a reload can re-read it.
   void set_config_path(std::string path) { config_path_ = std::move(path); }
 
   void run();
@@ -89,7 +88,7 @@ class Runtime {
   [[nodiscard]] std::size_t peer_count() const noexcept { return peer_count_; }
   [[nodiscard]] const WorkerStats& stats() const;
   [[nodiscard]] const ControlStats& control_stats() const;
-  // The most recent measured round trip to a peer, zero if none has completed.
+
   [[nodiscard]] Duration measured_rtt() const noexcept { return last_rtt_; }
 
   [[nodiscard]] bool congestion_active() const noexcept { return congestion_enabled_; }
@@ -108,16 +107,8 @@ class Runtime {
 
   [[nodiscard]] std::size_t dial_configured_peers();
 
-  // Re-reads the configuration and applies what can change while running:
-  // the peer set, their keys, endpoints and prefixes.
-  //
-  // Anything bound to the interface or the socket — the TUN name, the listen
-  // port, the addresses, the carrier — is refused rather than half-applied,
-  // because changing those means recreating the device and dropping every
-  // session, which is a restart by another name.
   [[nodiscard]] std::expected<std::size_t, RuntimeDiagnostic> reload(const std::string& path);
 
-  // Safe to call from a signal handler: it only stores to an atomic flag.
   void request_reload() noexcept { reload_requested_.store(true, std::memory_order_relaxed); }
 
  private:
@@ -130,21 +121,17 @@ class Runtime {
   void note_echo_reply(PeerId peer, std::span<const std::byte> token);
 
   void redial_dead_peers(Instant now);
+  void request_session(PeerId peer);
+  void wait_for_work(Instant now);
+  void report_loss(Instant now);
   void apply_congestion_control(Instant now);
 
-  // Accepts an inbound TCP connection and advances the carrier's connect and
-  // TLS handshake. A no-op unless the TCP carrier is the active one.
   void service_tcp_carrier(Instant now);
 
-  // Drives the QUIC handshake and dials the Noise handshake once it is up.
-  // A no-op unless the QUIC carrier is the active one.
   void service_quic_carrier();
 
-  // Samples each carrier's health and switches when the active one stops
-  // working. Only runs when more than one carrier was built.
   void evaluate_transport_paths(Instant now);
 
-  // Builds whichever carriers this configuration and build can support.
   [[nodiscard]] std::expected<void, RuntimeDiagnostic> build_carriers(
       const Config& config, const Endpoint& bind_address);
 
@@ -158,8 +145,7 @@ class Runtime {
   RoutingTable routes_;
   SessionTable sessions_;
   TimerWheel timers_;
-  // Observes whichever carrier is active. The three below own them, so a
-  // switch is a pointer change and the inactive carriers keep their state.
+
   Carrier* carrier_{};
   std::unique_ptr<QuicConnection> quic_;
   TcpTransport tcp_;
@@ -177,10 +163,6 @@ class Runtime {
   bool tcp_ready_{};
   bool quic_ready_{};
 
-  // Every carrier that could be used, kept alive so a switch is a pointer
-  // change rather than a reconnection.
-  // Concrete rather than Carrier: the runtime drives each one's connection
-  // state as well as its datagrams, and only the concrete types expose that.
   std::unique_ptr<UdpCarrier> udp_carrier_;
   std::unique_ptr<TcpCarrier> tcp_carrier_;
   std::unique_ptr<QuicCarrier> quic_carrier_;
@@ -192,9 +174,6 @@ class Runtime {
   std::uint32_t consecutive_stalls_{};
   Instant switched_at_{};
 
-  // The most recent measured round trip, from the keepalive echo. Zero until
-  // one completes, which is what tells the path selector it has no reading
-  // yet rather than a reading of zero.
   Duration last_rtt_{};
 
   CongestionController congestion_;
@@ -205,11 +184,13 @@ class Runtime {
   std::string config_path_;
   std::uint16_t listen_port_{};
   Instant last_liveness_sweep_{};
+  std::uint32_t fwmark_{};
+  Instant last_loss_report_{};
+  bool fec_configured_{};
   std::atomic<bool> running_{false};
 };
 
 [[nodiscard]] std::expected<PrivateKey, RuntimeError> load_private_key(const std::string& path);
 
 [[nodiscard]] bool decode_hex(std::string_view text, std::span<std::byte> out) noexcept;
-
 }

@@ -118,7 +118,6 @@ void append_decimal(std::string& out, std::uint16_t value) {
   const auto result = std::to_chars(buffer, buffer + sizeof(buffer), value);
   out.append(buffer, static_cast<std::size_t>(result.ptr - buffer));
 }
-
 }
 
 Address Address::from_bytes(AddressFamily family, std::span<const std::byte> bytes) noexcept {
@@ -229,7 +228,10 @@ std::expected<Prefix, Error> parse_prefix(std::string_view text) noexcept {
   if (result.ec != std::errc{} || result.ptr != end) {
     return std::unexpected(Error::malformed_packet);
   }
+
+  if (length > maximum_prefix_length(address->family())) {
+    return std::unexpected(Error::malformed_packet);
+  }
   return Prefix::create(*address, static_cast<std::uint8_t>(length));
 }
-
 }

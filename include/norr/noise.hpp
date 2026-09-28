@@ -72,6 +72,9 @@ class CipherState {
 
   [[nodiscard]] TrafficKey key() const noexcept { return key_; }
 
+  CipherState() = default;
+  CipherState(const CipherState&) = default;
+  CipherState& operator=(const CipherState&) = default;
   ~CipherState();
 
  private:
@@ -99,6 +102,9 @@ class SymmetricState {
   [[nodiscard]] const TranscriptHash& handshake_hash() const noexcept { return hash_; }
   [[nodiscard]] const ChainingKey& chaining_key() const noexcept { return chaining_key_; }
 
+  SymmetricState() = default;
+  SymmetricState(const SymmetricState&) = default;
+  SymmetricState& operator=(const SymmetricState&) = default;
   ~SymmetricState();
 
  private:
@@ -146,8 +152,16 @@ class NoiseHandshake {
 
   [[nodiscard]] std::expected<NoiseResult, NoiseError> result() const;
 
+  void use_ephemeral(const KeyPair& ephemeral) noexcept {
+    local_ephemeral_ = ephemeral;
+    has_fixed_ephemeral_ = true;
+  }
+
  private:
   NoiseHandshake() = default;
+
+  [[nodiscard]] std::expected<std::size_t, NoiseError> read_message_2_unchecked(
+      std::span<const std::byte> message, std::span<std::byte> payload_out);
 
   HandshakeRole role_{HandshakeRole::initiator};
   SymmetricState symmetric_;
@@ -160,6 +174,6 @@ class NoiseHandshake {
   bool sent_message_1_{};
   bool read_message_1_{};
   bool finished_{};
+  bool has_fixed_ephemeral_{};
 };
-
 }

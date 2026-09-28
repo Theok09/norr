@@ -38,7 +38,6 @@ struct HkdfOutputs {
   std::copy(third.begin(), third.end(), result.output3.begin());
   return result;
 }
-
 }
 
 CipherState::~CipherState() { secure_zero(key_); }
@@ -199,15 +198,18 @@ std::expected<std::size_t, NoiseError> NoiseHandshake::write_message_1(
     return std::unexpected(NoiseError::buffer_too_small);
   }
 
-  const auto ephemeral = generate_keypair();
-  if (!ephemeral) return std::unexpected(NoiseError::unsupported_platform);
-  local_ephemeral_ = *ephemeral;
+  if (!has_fixed_ephemeral_) {
+    const auto ephemeral = generate_keypair();
+    if (!ephemeral) return std::unexpected(NoiseError::unsupported_platform);
+    local_ephemeral_ = *ephemeral;
+  }
 
   std::size_t offset = 0;
 
   std::copy(local_ephemeral_.public_key.begin(), local_ephemeral_.public_key.end(),
             out.begin() + static_cast<std::ptrdiff_t>(offset));
   symmetric_.mix_hash(local_ephemeral_.public_key);
+  symmetric_.mix_key(local_ephemeral_.public_key);
   offset += kNoiseDhLength;
 
   {
@@ -250,6 +252,7 @@ std::expected<std::size_t, NoiseError> NoiseHandshake::read_message_1(
 
   std::copy_n(message.begin(), kNoiseDhLength, remote_ephemeral_.begin());
   symmetric_.mix_hash(remote_ephemeral_);
+  symmetric_.mix_key(remote_ephemeral_);
   offset += kNoiseDhLength;
 
   {
@@ -296,15 +299,18 @@ std::expected<std::size_t, NoiseError> NoiseHandshake::write_message_2(
     return std::unexpected(NoiseError::buffer_too_small);
   }
 
-  const auto ephemeral = generate_keypair();
-  if (!ephemeral) return std::unexpected(NoiseError::unsupported_platform);
-  local_ephemeral_ = *ephemeral;
+  if (!has_fixed_ephemeral_) {
+    const auto ephemeral = generate_keypair();
+    if (!ephemeral) return std::unexpected(NoiseError::unsupported_platform);
+    local_ephemeral_ = *ephemeral;
+  }
 
   std::size_t offset = 0;
 
   std::copy(local_ephemeral_.public_key.begin(), local_ephemeral_.public_key.end(),
             out.begin() + static_cast<std::ptrdiff_t>(offset));
   symmetric_.mix_hash(local_ephemeral_.public_key);
+  symmetric_.mix_key(local_ephemeral_.public_key);
   offset += kNoiseDhLength;
 
   {
@@ -338,10 +344,23 @@ std::expected<std::size_t, NoiseError> NoiseHandshake::read_message_2(
     return std::unexpected(NoiseError::message_too_short);
   }
 
+  const SymmetricState saved_symmetric = symmetric_;
+  const PublicKey saved_ephemeral = remote_ephemeral_;
+  auto result = read_message_2_unchecked(message, payload_out);
+  if (!result) {
+    symmetric_ = saved_symmetric;
+    remote_ephemeral_ = saved_ephemeral;
+  }
+  return result;
+}
+
+std::expected<std::size_t, NoiseError> NoiseHandshake::read_message_2_unchecked(
+    std::span<const std::byte> message, std::span<std::byte> payload_out) {
   std::size_t offset = 0;
 
   std::copy_n(message.begin(), kNoiseDhLength, remote_ephemeral_.begin());
   symmetric_.mix_hash(remote_ephemeral_);
+  symmetric_.mix_key(remote_ephemeral_);
   offset += kNoiseDhLength;
 
   {
@@ -387,5 +406,4 @@ std::expected<NoiseResult, NoiseError> NoiseHandshake::result() const {
   result.remote_static = remote_static_;
   return result;
 }
-
 }

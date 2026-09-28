@@ -50,7 +50,6 @@ namespace {
 constexpr const char* kPriority = "NORMAL:-VERS-ALL:+VERS-TLS1.3:+ECDHE-PSK:+PSK";
 
 constexpr std::size_t kMinimumPskBytes = 16;
-
 }
 
 struct TlsSession::Impl {
@@ -87,7 +86,6 @@ int psk_server_callback(gnutls_session_t session, const char* username, gnutls_d
   std::memcpy(key->data, impl->key.data(), impl->key.size());
   return 0;
 }
-
 }
 
 std::expected<void, TlsError> TlsSession::start(int descriptor, TlsRole role,
@@ -203,5 +201,4 @@ std::string TlsSession::description() const {
 }
 
 #endif
-
 }

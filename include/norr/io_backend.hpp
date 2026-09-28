@@ -65,5 +65,4 @@ struct BackendReport {
 [[nodiscard]] constexpr IoBackend active_io_backend() noexcept {
   return IoBackend::batched_syscalls;
 }
-
 }

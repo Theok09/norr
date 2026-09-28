@@ -30,16 +30,10 @@ struct IpPacketView {
 [[nodiscard]] std::expected<IpPacketView, Error> parse_ip_packet(
     std::span<const std::byte> bytes) noexcept;
 
-// The length an IP header declares, without validating the rest of the packet.
-//
-// A padded buffer is longer than the packet it carries, and `parse_ip_packet`
-// requires the declared length to match the span exactly. This reads just
-// enough to trim the padding off first.
 [[nodiscard]] std::optional<std::size_t> declared_ip_length(
     std::span<const std::byte> bytes) noexcept;
 
 [[nodiscard]] bool is_multicast(const Address& address) noexcept;
 [[nodiscard]] bool is_unspecified(const Address& address) noexcept;
 [[nodiscard]] bool is_loopback(const Address& address) noexcept;
-
 }

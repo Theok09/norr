@@ -60,5 +60,4 @@ class HandshakeMachine {
   HandshakeState state_{HandshakeState::idle};
   KeyGeneration generation_{};
 };
-
 }

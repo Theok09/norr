@@ -11,7 +11,6 @@ namespace {
 [[nodiscard]] constexpr std::uint64_t bit_of(std::uint64_t counter) noexcept {
   return UINT64_C(1) << (counter % 64U);
 }
-
 }
 
 bool ReplayWindow::test(std::uint64_t counter) const noexcept {
@@ -53,5 +52,4 @@ ReplayResult ReplayWindow::accept(std::uint64_t counter) noexcept {
   set(counter);
   return ReplayResult::accepted;
 }
-
 }

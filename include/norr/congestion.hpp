@@ -98,5 +98,4 @@ class CongestionController {
   CongestionAction last_action_{CongestionAction::hold};
   CongestionStats stats_{};
 };
-
 }

@@ -17,7 +17,6 @@ constexpr double kSmoothing = 0.33;
   if (capacity == 0) return 0.0;
   return static_cast<double>(used) / static_cast<double>(capacity);
 }
-
 }
 
 bool LoadMonitor::any_high() const noexcept {
@@ -84,5 +83,4 @@ void LoadMonitor::observe(const LoadSample& sample, Instant now) {
 
   if (state_ != previous) ++transitions_;
 }
-
 }

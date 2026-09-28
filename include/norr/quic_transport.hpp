@@ -110,6 +110,12 @@ class Ngtcp2Connection final : public QuicConnection {
                                                       const Endpoint& peer,
                                                       std::span<const std::byte> initial);
 
+  void service_timers();
+
+  [[nodiscard]] bool active() const noexcept;
+
+  [[nodiscard]] bool broken() const noexcept;
+
   struct Impl;
 
  private:
@@ -142,5 +148,4 @@ class LoopbackQuicConnection final : public QuicConnection {
   std::vector<std::vector<std::byte>> ready_;
   QuicStats stats_{};
 };
-
 }

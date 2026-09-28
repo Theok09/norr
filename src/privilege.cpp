@@ -2,11 +2,14 @@
 // Licensed under the GNU AGPL v3 or later. See LICENSE.
 #include "norr/privilege.hpp"
 
+#include <array>
 #include <cerrno>
 
 #if defined(__linux__)
 #include <grp.h>
+#include <linux/capability.h>
 #include <pwd.h>
+#include <sys/syscall.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -43,6 +46,12 @@ std::expected<void, PrivilegeError> drop_capabilities() noexcept {
   return std::unexpected(PrivilegeError::unsupported);
 }
 
+std::expected<void, PrivilegeError> drop_privileges(std::string_view, bool) noexcept {
+  return std::unexpected(PrivilegeError::unsupported);
+}
+
+bool has_net_admin() noexcept { return false; }
+
 std::expected<void, PrivilegeError> check_key_file_permissions(const std::string&) noexcept {
   return std::unexpected(PrivilegeError::unsupported);
 }
@@ -74,10 +83,66 @@ std::expected<void, PrivilegeError> set_no_new_privileges() noexcept {
   return {};
 }
 
-std::expected<void, PrivilegeError> drop_capabilities() noexcept {
-  if (!running_as_root()) return {};
+namespace {
+constexpr std::uint32_t kNetAdminBit = 1U << CAP_NET_ADMIN;
 
-  return std::unexpected(PrivilegeError::not_permitted);
+[[nodiscard]] bool read_capabilities(std::array<__user_cap_data_struct, 2>& data) noexcept {
+  __user_cap_header_struct header{.version = _LINUX_CAPABILITY_VERSION_3, .pid = 0};
+  return ::syscall(SYS_capget, &header, data.data()) == 0;
+}
+
+[[nodiscard]] bool set_capabilities(std::uint32_t low_bits) noexcept {
+  __user_cap_header_struct header{.version = _LINUX_CAPABILITY_VERSION_3, .pid = 0};
+  std::array<__user_cap_data_struct, 2> data{};
+  data[0].effective = low_bits;
+  data[0].permitted = low_bits;
+  data[0].inheritable = 0;
+  return ::syscall(SYS_capset, &header, data.data()) == 0;
+}
+
+void clear_ambient() noexcept {
+#if defined(PR_CAP_AMBIENT)
+  static_cast<void>(::prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0));
+#endif
+}
+}
+
+bool has_net_admin() noexcept {
+  std::array<__user_cap_data_struct, 2> data{};
+  if (!read_capabilities(data)) return false;
+  return (data[0].effective & kNetAdminBit) != 0U;
+}
+
+std::expected<void, PrivilegeError> drop_capabilities() noexcept {
+  clear_ambient();
+  if (!set_capabilities(0)) return std::unexpected(PrivilegeError::capability_failed);
+  return {};
+}
+
+std::expected<void, PrivilegeError> drop_privileges(std::string_view username,
+                                                    bool keep_net_admin) noexcept {
+  std::array<__user_cap_data_struct, 2> current{};
+  if (!read_capabilities(current)) return std::unexpected(PrivilegeError::capability_failed);
+  const auto keep = keep_net_admin ? (current[0].permitted & kNetAdminBit) : 0U;
+
+  if (running_as_root()) {
+    for (unsigned capability = 0; capability < 64; ++capability) {
+      if (keep_net_admin && capability == CAP_NET_ADMIN) continue;
+      if (::prctl(PR_CAPBSET_DROP, capability, 0, 0, 0) != 0 && errno != EINVAL) {
+        return std::unexpected(PrivilegeError::capability_failed);
+      }
+    }
+    if (::prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0) != 0) {
+      return std::unexpected(PrivilegeError::capability_failed);
+    }
+    if (const auto dropped = drop_to_user(username); !dropped) return dropped;
+    static_cast<void>(::prctl(PR_SET_KEEPCAPS, 0, 0, 0, 0));
+  }
+
+  clear_ambient();
+  if (!set_capabilities(keep)) return std::unexpected(PrivilegeError::capability_failed);
+  if (running_as_root()) return std::unexpected(PrivilegeError::still_privileged);
+  return {};
 }
 
 std::expected<void, PrivilegeError> drop_to_user(std::string_view username) noexcept {
@@ -138,5 +203,4 @@ PrivilegeState current_privilege_state() noexcept {
 }
 
 #endif
-
 }

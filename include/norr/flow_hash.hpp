@@ -29,5 +29,4 @@ inline constexpr std::uint8_t kProtocolUdp = 17;
   if (worker_count <= 1) return 0;
   return static_cast<std::size_t>(hash_flow(key) % worker_count);
 }
-
 }

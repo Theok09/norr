@@ -103,11 +103,15 @@ ForwardResult RoutingTable::classify(const IpPacketView& packet,
   }
 
   const auto destination_peer = lookup_locked(packet.destination);
-  if (destination_peer == kNoPeer) return refuse(ForwardDecision::no_route);
+  if (destination_peer == kNoPeer) {
+    if (ingress_peer != kNoPeer) {
+      return ForwardResult{.decision = ForwardDecision::deliver_local, .peer = kNoPeer};
+    }
+    return refuse(ForwardDecision::no_route);
+  }
 
   if (destination_peer == ingress_peer) return refuse(ForwardDecision::routing_loop);
 
   return ForwardResult{.decision = ForwardDecision::forward, .peer = destination_peer};
 }
-
 }

@@ -54,7 +54,6 @@ constexpr void mix(std::array<std::uint32_t, 16>& v, std::size_t a, std::size_t 
   v[c] = v[c] + v[d];
   v[b] = rotate_right(v[b] ^ v[c], 7);
 }
-
 }
 
 Blake2s::Blake2s(std::size_t digest_size, std::span<const std::byte> key) noexcept {
@@ -236,5 +235,4 @@ bool hkdf_expand(std::span<const std::byte> pseudorandom_key, std::span<const st
   }
   return true;
 }
-
 }

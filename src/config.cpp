@@ -2,6 +2,8 @@
 // Licensed under the GNU AGPL v3 or later. See LICENSE.
 #include "norr/config.hpp"
 
+#include "norr/endpoint.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <charconv>
@@ -84,7 +86,6 @@ using Diagnostic = ConfigDiagnostic;
   }
   return static_cast<std::uint16_t>(*parsed);
 }
-
 }
 
 std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
@@ -112,12 +113,15 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
     if (line.front() == '[') {
       if (line.size() > 4 && line.starts_with("[[") && line.ends_with("]]")) {
         const auto name = trim(line.substr(2, line.size() - 4));
-        if (name != "peer") {
+        if (name == "peer") {
+          config.peers.emplace_back();
+        } else if (name == "forward") {
+          config.forwards.emplace_back();
+        } else {
           return std::unexpected(
               Diagnostic{ConfigError::unknown_section, line_number, std::string{name}});
         }
-        config.peers.emplace_back();
-        section = "peer";
+        section = std::string{name};
         continue;
       }
       if (line.back() != ']' || line.size() <= 2) {
@@ -148,9 +152,9 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
     }
 
     const auto qualified = section + "." + std::string{key};
-    const auto scoped = section == "peer"
-                            ? std::to_string(config.peers.size()) + "." + qualified
-                            : qualified;
+    const auto scoped = section == "peer"      ? std::to_string(config.peers.size()) + "." + qualified
+                        : section == "forward" ? std::to_string(config.forwards.size()) + "." + qualified
+                                               : qualified;
     if (!seen.insert(scoped).second) {
       return std::unexpected(Diagnostic{ConfigError::duplicate_key, line_number, qualified});
     }
@@ -168,9 +172,44 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       const auto port = parse_port(value);
       if (!port) return fail(port.error());
       config.listen_port = *port;
+    } else if (qualified == "node.user") {
+      if (value.empty() || value.size() > 32) return fail(ConfigError::invalid_value);
+      config.user = std::string{value};
     } else if (qualified == "node.tun") {
       if (value.empty() || value.size() > 15) return fail(ConfigError::invalid_value);
       config.tun_name = std::string{value};
+    } else if (section == "forward") {
+      auto& entry = config.forwards.back();
+      if (key == "name") {
+        if (value.empty()) return fail(ConfigError::invalid_value);
+        entry.name = std::string{value};
+      } else if (key == "listen_port") {
+        const auto port = parse_port(value);
+        if (!port) return fail(port.error());
+        entry.port = *port;
+      } else if (key == "target") {
+        if (!parse_endpoint(value)) return fail(ConfigError::invalid_value);
+        entry.target = std::string{value};
+      } else if (key == "preserve_source") {
+        const auto flag = parse_bool(value);
+        if (!flag) return fail(flag.error());
+        entry.preserve_source = *flag;
+      } else if (key == "protocol") {
+        if (value == "tcp") {
+          entry.tcp = true;
+          entry.udp = false;
+        } else if (value == "udp") {
+          entry.tcp = false;
+          entry.udp = true;
+        } else if (value == "both") {
+          entry.tcp = true;
+          entry.udp = true;
+        } else {
+          return fail(ConfigError::invalid_value);
+        }
+      } else {
+        return fail(ConfigError::unknown_key);
+      }
     } else if (section == "peer") {
       auto& entry = config.peers.back();
       if (key == "name") {
@@ -187,6 +226,10 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
           return fail(ConfigError::invalid_value);
         }
         entry.endpoint = std::string{value};
+      } else if (key == "routes") {
+        const auto flag = parse_bool(value);
+        if (!flag) return fail(flag.error());
+        entry.routes = *flag;
       } else if (key == "allowed_ips") {
         for (const auto part : split_list(value)) {
           if (part.empty() || part.find('/') == std::string_view::npos) {
@@ -213,6 +256,23 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
         config.network.addresses.emplace_back(part);
       }
       if (config.network.addresses.empty()) return fail(ConfigError::invalid_value);
+    } else if (qualified == "network.fwmark") {
+      const auto mark = parse_uint(value);
+      if (!mark) return fail(mark.error());
+      if (*mark == 0 || *mark > 0xFFFF'FFFFULL) return fail(ConfigError::value_out_of_range);
+      config.network.fwmark = static_cast<std::uint32_t>(*mark);
+    } else if (qualified == "network.return_via_tunnel") {
+      const auto flag = parse_bool(value);
+      if (!flag) return fail(flag.error());
+      config.network.return_via_tunnel = *flag;
+    } else if (qualified == "network.offload") {
+      const auto flag = parse_bool(value);
+      if (!flag) return fail(flag.error());
+      config.network.offload = *flag;
+    } else if (qualified == "network.forward") {
+      const auto flag = parse_bool(value);
+      if (!flag) return fail(flag.error());
+      config.network.forward = *flag;
     } else if (qualified == "network.mtu") {
       const auto mtu = parse_mtu(value);
       if (!mtu) return fail(mtu.error());
@@ -247,6 +307,7 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       else if (value == "light") config.fec = FecMode::light;
       else if (value == "moderate") config.fec = FecMode::moderate;
       else if (value == "aggressive") config.fec = FecMode::aggressive;
+      else if (value == "auto") config.fec = FecMode::automatic;
       else return fail(ConfigError::invalid_value);
     } else if (qualified == "observability.metrics") {
       const auto flag = parse_bool(value);
@@ -291,6 +352,29 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
     }
   }
 
+  std::unordered_set<std::string> forwarded;
+  for (std::size_t index = 0; index < config.forwards.size(); ++index) {
+    const auto& forward = config.forwards[index];
+    const auto label = forward.name.empty() ? "forward[" + std::to_string(index) + "]" : forward.name;
+    if (forward.port == 0) {
+      return std::unexpected(Diagnostic{ConfigError::missing_required, 0, label + ".listen_port"});
+    }
+    if (forward.target.empty()) {
+      return std::unexpected(Diagnostic{ConfigError::missing_required, 0, label + ".target"});
+    }
+    for (const auto* protocol : {"tcp", "udp"}) {
+      const bool used = std::string_view{protocol} == "tcp" ? forward.tcp : forward.udp;
+      if (!used) continue;
+      if (!forwarded.insert(std::string{protocol} + "/" + std::to_string(forward.port)).second) {
+        return std::unexpected(Diagnostic{ConfigError::duplicate_key, 0, label + ".listen_port"});
+      }
+    }
+    if (forward.port == config.listen_port && forward.udp) {
+      return std::unexpected(
+          Diagnostic{ConfigError::incompatible_options, 0, label + " uses the tunnel port"});
+    }
+  }
+
   if (config.qos_enabled && config.qos_rate_bytes == 0) {
     return std::unexpected(Diagnostic{ConfigError::missing_required, 0, "qos.rate_bytes"});
   }
@@ -328,5 +412,4 @@ std::expected<Config, ConfigDiagnostic> load_config_file(const std::string& path
   }
   return parse_config(buffer.str());
 }
-
 }

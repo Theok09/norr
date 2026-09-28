@@ -77,5 +77,4 @@ std::expected<HandshakeMessage, HandshakeError> HandshakeMachine::start_rekey() 
   state_ = HandshakeState::rekeying;
   return HandshakeMessage::rekey_init;
 }
-
 }

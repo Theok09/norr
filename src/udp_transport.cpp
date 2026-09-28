@@ -33,6 +33,11 @@ namespace {
     std::memcpy(&address, &storage, sizeof(address));
     std::array<std::byte, 16> octets{};
     std::memcpy(octets.data(), address.sin6_addr.s6_addr, octets.size());
+    constexpr std::array<std::uint8_t, 12> kMappedPrefix{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF};
+    if (std::memcmp(octets.data(), kMappedPrefix.data(), kMappedPrefix.size()) == 0) {
+      return Endpoint{Address::from_bytes(AddressFamily::ipv4, std::span{octets}.subspan(12)),
+                      ntohs(address.sin6_port)};
+    }
     return Endpoint{Address::from_bytes(AddressFamily::ipv6, octets), ntohs(address.sin6_port)};
   }
   return Endpoint{};
@@ -74,7 +79,6 @@ namespace {
 }
 
 #endif
-
 }
 
 ReceiveBuffers::ReceiveBuffers(std::size_t count, std::size_t datagram_size)
@@ -99,7 +103,15 @@ std::expected<void, TransportError> UdpTransport::start(const Endpoint&, bool) {
   return std::unexpected(TransportError::unsupported_platform);
 }
 
-void UdpTransport::stop() noexcept { socket_.reset(); }
+void UdpTransport::stop() noexcept {
+  socket_.reset();
+  backlog_.clear();
+  backlog_next_ = 0;
+}
+
+std::expected<void, TransportError> UdpTransport::set_mark(std::uint32_t) {
+  return std::unexpected(TransportError::unsupported_platform);
+}
 
 std::expected<std::uint16_t, TransportError> UdpTransport::local_port() const {
   return std::unexpected(TransportError::unsupported_platform);
@@ -184,6 +196,7 @@ std::expected<void, TransportError> UdpTransport::start(const Endpoint& bind_add
         ::setsockopt(socket_.get(), IPPROTO_UDP, UDP_SEGMENT, &probe, sizeof(probe)) == 0;
   }
 #endif
+  offloads_.udp_gro = false;
 #if defined(UDP_GRO)
   {
     const int enable_gro = 1;
@@ -191,10 +204,30 @@ std::expected<void, TransportError> UdpTransport::start(const Endpoint& bind_add
         ::setsockopt(socket_.get(), IPPROTO_UDP, UDP_GRO, &enable_gro, sizeof(enable_gro)) == 0;
   }
 #endif
+  backlog_.clear();
+  backlog_next_ = 0;
+
+  constexpr int kSocketBufferBytes = 8 * 1024 * 1024;
+  for (const int option : {SO_RCVBUFFORCE, SO_SNDBUFFORCE}) {
+    if (::setsockopt(socket_.get(), SOL_SOCKET, option, &kSocketBufferBytes,
+                     sizeof(kSocketBufferBytes)) != 0) {
+      const int fallback = option == SO_RCVBUFFORCE ? SO_RCVBUF : SO_SNDBUF;
+      static_cast<void>(::setsockopt(socket_.get(), SOL_SOCKET, fallback, &kSocketBufferBytes,
+                                     sizeof(kSocketBufferBytes)));
+    }
+  }
   return {};
 }
 
 void UdpTransport::stop() noexcept { socket_.reset(); }
+
+std::expected<void, TransportError> UdpTransport::set_mark(std::uint32_t mark) {
+  if (!socket_.valid()) return std::unexpected(TransportError::not_started);
+  if (::setsockopt(socket_.get(), SOL_SOCKET, SO_MARK, &mark, sizeof(mark)) != 0) {
+    return std::unexpected(TransportError::socket_option_failed);
+  }
+  return {};
+}
 
 std::expected<std::uint16_t, TransportError> UdpTransport::local_port() const {
   if (!socket_.valid()) return std::unexpected(TransportError::not_started);
@@ -212,43 +245,103 @@ std::expected<std::size_t, TransportError> UdpTransport::send_batch(
   if (!socket_.valid()) return std::unexpected(TransportError::not_started);
   if (datagrams.empty()) return std::size_t{0};
 
+  constexpr std::size_t kSegmentLimit = 65000;
   const auto count = std::min(datagrams.size(), kDefaultBatchSize);
   std::array<mmsghdr, kDefaultBatchSize> messages{};
   std::array<iovec, kDefaultBatchSize> vectors{};
   std::array<sockaddr_storage, kDefaultBatchSize> addresses{};
+  std::array<std::size_t, kDefaultBatchSize> members{};
+  std::array<std::size_t, kDefaultBatchSize> firsts{};
+  alignas(cmsghdr) std::array<std::array<std::byte, CMSG_SPACE(sizeof(std::uint16_t))>,
+                              kDefaultBatchSize> controls{};
 
-  std::size_t prepared = 0;
+  const bool gso = offloads_.udp_gso;
+  std::size_t groups = 0;
+  std::size_t segment = 0;
+  std::size_t group_bytes = 0;
+  bool closed = true;
+
   for (std::size_t index = 0; index < count; ++index) {
-    const auto length = sockaddr_from_endpoint(datagrams[index].destination, family_,
-                                               addresses[prepared]);
+    const auto& datagram = datagrams[index];
+    const auto size = datagram.payload.size();
+    vectors[index].iov_base = const_cast<std::byte*>(datagram.payload.data());
+    vectors[index].iov_len = size;
 
-    if (length == 0) continue;
+    const bool extend = gso && groups > 0 && !closed &&
+                        datagram.destination == datagrams[firsts[groups - 1]].destination &&
+                        size <= segment && members[groups - 1] < kMaximumSegments &&
+                        group_bytes + size <= kSegmentLimit && size > 0;
+    if (extend) {
+      ++members[groups - 1];
+      group_bytes += size;
+      if (size < segment) closed = true;
+      continue;
+    }
 
-    vectors[prepared].iov_base = const_cast<std::byte*>(datagrams[index].payload.data());
-    vectors[prepared].iov_len = datagrams[index].payload.size();
-
-    auto& header = messages[prepared].msg_hdr;
-    header.msg_name = &addresses[prepared];
+    const auto length = sockaddr_from_endpoint(datagram.destination, family_, addresses[groups]);
+    if (length == 0) {
+      closed = true;
+      continue;
+    }
+    firsts[groups] = index;
+    members[groups] = 1;
+    auto& header = messages[groups].msg_hdr;
+    header.msg_name = &addresses[groups];
     header.msg_namelen = length;
-    header.msg_iov = &vectors[prepared];
-    header.msg_iovlen = 1;
-    ++prepared;
+    header.msg_iov = &vectors[index];
+    segment = size;
+    group_bytes = size;
+    closed = false;
+    ++groups;
   }
-  if (prepared == 0) return std::size_t{0};
+  if (groups == 0) return count;
 
-  const auto sent = ::sendmmsg(socket_.get(), messages.data(), static_cast<unsigned>(prepared), 0);
-  if (sent < 0) {
-    if (errno == EAGAIN || errno == EWOULDBLOCK) return std::unexpected(TransportError::would_block);
-    ++stats_.tx_errors;
-    return std::unexpected(TransportError::send_failed);
+  for (std::size_t group = 0; group < groups; ++group) {
+    auto& header = messages[group].msg_hdr;
+    header.msg_iovlen = static_cast<decltype(header.msg_iovlen)>(members[group]);
+    if (members[group] > 1) {
+      header.msg_control = controls[group].data();
+      header.msg_controllen = static_cast<decltype(header.msg_controllen)>(controls[group].size());
+      auto* message = CMSG_FIRSTHDR(&header);
+      message->cmsg_level = SOL_UDP;
+      message->cmsg_type = UDP_SEGMENT;
+      message->cmsg_len = CMSG_LEN(sizeof(std::uint16_t));
+      const auto size = static_cast<std::uint16_t>(vectors[firsts[group]].iov_len);
+      std::memcpy(CMSG_DATA(message), &size, sizeof(size));
+    }
   }
 
-  const auto delivered = static_cast<std::size_t>(sent);
-  for (std::size_t index = 0; index < delivered; ++index) {
-    stats_.tx_bytes += messages[index].msg_len;
+  std::size_t sent_groups = 0;
+  while (sent_groups < groups) {
+    const auto sent = ::sendmmsg(socket_.get(), messages.data() + sent_groups,
+                                 static_cast<unsigned>(groups - sent_groups), 0);
+    if (sent < 0) {
+      if (errno == EINTR) continue;
+      if (errno == EIO && gso) {
+        offloads_.udp_gso = false;
+        if (sent_groups == 0) return send_batch(datagrams);
+        break;
+      }
+      if (sent_groups > 0) break;
+      if (errno == EAGAIN || errno == EWOULDBLOCK) return std::unexpected(TransportError::would_block);
+      ++stats_.tx_errors;
+      return std::unexpected(TransportError::send_failed);
+    }
+    if (sent == 0) break;
+    for (std::size_t group = sent_groups; group < sent_groups + static_cast<std::size_t>(sent);
+         ++group) {
+      stats_.tx_bytes += messages[group].msg_len;
+      stats_.tx_packets += members[group];
+      if (members[group] > 1) {
+        ++stats_.gso_writes;
+        stats_.gso_segments += members[group];
+      }
+    }
+    sent_groups += static_cast<std::size_t>(sent);
   }
-  stats_.tx_packets += delivered;
-  return delivered;
+
+  if (sent_groups == groups) return count;
+  return firsts[sent_groups];
 }
 
 std::expected<std::size_t, TransportError> UdpTransport::receive_batch(
@@ -256,10 +349,21 @@ std::expected<std::size_t, TransportError> UdpTransport::receive_batch(
   if (!socket_.valid()) return std::unexpected(TransportError::not_started);
   if (out.empty() || buffers.count() == 0) return std::size_t{0};
 
+  if (backlog_next_ < backlog_.size()) {
+    const auto take = std::min(out.size(), backlog_.size() - backlog_next_);
+    std::copy_n(backlog_.begin() + static_cast<std::ptrdiff_t>(backlog_next_), take, out.begin());
+    backlog_next_ += take;
+    return take;
+  }
+  backlog_.clear();
+  backlog_next_ = 0;
+
   const auto count = std::min({out.size(), buffers.count(), kDefaultBatchSize});
   std::array<mmsghdr, kDefaultBatchSize> messages{};
   std::array<iovec, kDefaultBatchSize> vectors{};
   std::array<sockaddr_storage, kDefaultBatchSize> addresses{};
+  alignas(cmsghdr) std::array<std::array<std::byte, CMSG_SPACE(sizeof(int))>, kDefaultBatchSize>
+      controls{};
 
   for (std::size_t index = 0; index < count; ++index) {
     const auto slot = buffers.slot(index);
@@ -271,6 +375,10 @@ std::expected<std::size_t, TransportError> UdpTransport::receive_batch(
     header.msg_namelen = sizeof(sockaddr_storage);
     header.msg_iov = &vectors[index];
     header.msg_iovlen = 1;
+    if (offloads_.udp_gro) {
+      header.msg_control = controls[index].data();
+      header.msg_controllen = static_cast<decltype(header.msg_controllen)>(controls[index].size());
+    }
   }
 
   const auto received = ::recvmmsg(socket_.get(), messages.data(), static_cast<unsigned>(count),
@@ -283,28 +391,43 @@ std::expected<std::size_t, TransportError> UdpTransport::receive_batch(
 
   std::size_t delivered = 0;
   for (std::size_t index = 0; index < static_cast<std::size_t>(received); ++index) {
-    if ((messages[index].msg_hdr.msg_flags & MSG_TRUNC) != 0) {
+    auto& header = messages[index].msg_hdr;
+    if ((header.msg_flags & MSG_TRUNC) != 0) {
       ++stats_.rx_truncated;
       continue;
     }
 
     const auto source = endpoint_from_sockaddr(addresses[index]);
-
     if (source.port() == 0) {
       ++stats_.rx_errors;
       continue;
     }
 
     const auto length = static_cast<std::size_t>(messages[index].msg_len);
-    out[delivered] = InboundDatagram{
-        .source = source,
-        .payload = buffers.slot(index).first(length),
-    };
+    std::size_t segment = length;
+#if defined(UDP_GRO)
+    for (auto* message = CMSG_FIRSTHDR(&header); message != nullptr;
+         message = CMSG_NXTHDR(&header, message)) {
+      if (message->cmsg_level == SOL_UDP && message->cmsg_type == UDP_GRO) {
+        int size = 0;
+        std::memcpy(&size, CMSG_DATA(message), sizeof(size));
+        if (size > 0) segment = static_cast<std::size_t>(size);
+      }
+    }
+#endif
+    const auto slot = buffers.slot(index).first(length);
     stats_.rx_bytes += length;
-    ++delivered;
+    for (std::size_t offset = 0; offset < length; offset += segment) {
+      const InboundDatagram datagram{.source = source,
+                                     .payload = slot.subspan(offset, std::min(segment, length - offset))};
+      if (delivered < out.size()) {
+        out[delivered++] = datagram;
+      } else {
+        backlog_.push_back(datagram);
+      }
+      ++stats_.rx_packets;
+    }
   }
-
-  stats_.rx_packets += delivered;
   return delivered;
 }
 
@@ -353,7 +476,7 @@ std::expected<std::size_t, TransportError> UdpTransport::send_segmented(
   header.msg_iov = &vector;
   header.msg_iovlen = 1;
   header.msg_control = control.data();
-  header.msg_controllen = control.size();
+  header.msg_controllen = static_cast<decltype(header.msg_controllen)>(control.size());
 
   auto* message = CMSG_FIRSTHDR(&header);
   message->cmsg_level = SOL_UDP;
@@ -380,5 +503,4 @@ std::expected<std::size_t, TransportError> UdpTransport::send_segmented(
 }
 
 #endif
-
 }

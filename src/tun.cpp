@@ -2,13 +2,17 @@
 // Licensed under the GNU AGPL v3 or later. See LICENSE.
 #include "norr/tun.hpp"
 
+#include <array>
 #include <cstring>
+
+#include "norr/offload.hpp"
 
 #if defined(__linux__)
 #include <fcntl.h>
 #include <linux/if.h>
 #include <linux/if_tun.h>
 #include <sys/ioctl.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -25,7 +29,18 @@ bool TunDevice::supported() noexcept {
 
 #if !defined(__linux__)
 
-std::expected<void, TunError> TunDevice::open(std::string_view, bool, bool) {
+std::expected<void, TunError> TunDevice::open(std::string_view, bool, bool, bool) {
+  return std::unexpected(TunError::unsupported_platform);
+}
+
+std::expected<std::size_t, TunError> TunDevice::write_offloaded(std::span<const std::byte>,
+                                                                std::span<const std::byte>) {
+  return std::unexpected(TunError::unsupported_platform);
+}
+
+std::expected<std::size_t, TunError> TunDevice::write_vectored(
+    std::span<const std::byte>, std::span<const std::byte>,
+    std::span<const std::span<const std::byte>>) {
   return std::unexpected(TunError::unsupported_platform);
 }
 
@@ -54,7 +69,7 @@ std::expected<std::size_t, TunError> TunDevice::write_frame(std::span<const std:
 #else
 
 std::expected<void, TunError> TunDevice::open(std::string_view requested_name, bool non_blocking,
-                                              bool multiqueue) {
+                                              bool multiqueue, bool offload) {
   if (device_.valid()) return std::unexpected(TunError::already_open);
   if (requested_name.size() > kMaximumNameLength) {
     return std::unexpected(TunError::name_too_long);
@@ -67,6 +82,7 @@ std::expected<void, TunError> TunDevice::open(std::string_view requested_name, b
   std::memset(&request, 0, sizeof(request));
 
   request.ifr_flags = IFF_TUN | IFF_NO_PI;
+  if (offload) request.ifr_flags |= IFF_VNET_HDR;
 #if defined(IFF_MULTI_QUEUE)
 
   if (multiqueue) request.ifr_flags |= IFF_MULTI_QUEUE;
@@ -82,6 +98,24 @@ std::expected<void, TunError> TunDevice::open(std::string_view requested_name, b
     return std::unexpected(TunError::configure_failed);
   }
 
+  if (offload) {
+    int header_size = static_cast<int>(kVirtioHeaderSize);
+    if (::ioctl(device.get(), TUNSETVNETHDRSZ, &header_size) != 0) {
+      return std::unexpected(TunError::configure_failed);
+    }
+    const unsigned base = TUN_F_CSUM | TUN_F_TSO4 | TUN_F_TSO6;
+#if defined(TUN_F_USO4) && defined(TUN_F_USO6)
+    if (::ioctl(device.get(), TUNSETOFFLOAD, base | TUN_F_USO4 | TUN_F_USO6) != 0 &&
+        ::ioctl(device.get(), TUNSETOFFLOAD, base) != 0) {
+      static_cast<void>(::ioctl(device.get(), TUNSETOFFLOAD, 0U));
+    }
+#else
+    if (::ioctl(device.get(), TUNSETOFFLOAD, base) != 0) {
+      static_cast<void>(::ioctl(device.get(), TUNSETOFFLOAD, 0U));
+    }
+#endif
+  }
+
   if (non_blocking) {
     const auto flags = ::fcntl(device.get(), F_GETFL, 0);
     if (flags < 0 || ::fcntl(device.get(), F_SETFL, flags | O_NONBLOCK) != 0) {
@@ -93,6 +127,7 @@ std::expected<void, TunError> TunDevice::open(std::string_view requested_name, b
   name_.assign(request.ifr_name);
   device_ = std::move(device);
   multiqueue_ = multiqueue;
+  offload_ = offload;
   stats_ = TunStats{};
   return {};
 }
@@ -146,14 +181,14 @@ std::expected<std::span<const std::byte>, TunError> TunDevice::read_frame(
   if (!device_.valid()) return std::unexpected(TunError::not_open);
   if (buffer.empty()) return std::unexpected(TunError::frame_too_large);
 
-  const auto limit = std::min(buffer.size(), kMaximumFrameSize);
+  const auto limit = offload_ ? buffer.size() : std::min(buffer.size(), kMaximumFrameSize);
 
   while (true) {
     const auto result = ::read(device_.get(), buffer.data(), limit);
     if (result >= 0) {
       const auto length = static_cast<std::size_t>(result);
 
-      if (length == limit && limit < kMaximumFrameSize) {
+      if (!offload_ && length == limit && limit < kMaximumFrameSize) {
         ++stats_.oversized;
         return std::span<const std::byte>{};
       }
@@ -169,8 +204,71 @@ std::expected<std::span<const std::byte>, TunError> TunDevice::read_frame(
   }
 }
 
+std::expected<std::size_t, TunError> TunDevice::write_offloaded(
+    std::span<const std::byte> header, std::span<const std::byte> packet) {
+  if (!device_.valid()) return std::unexpected(TunError::not_open);
+  std::array<iovec, 2> vectors{};
+  vectors[0].iov_base = const_cast<std::byte*>(header.data());
+  vectors[0].iov_len = header.size();
+  vectors[1].iov_base = const_cast<std::byte*>(packet.data());
+  vectors[1].iov_len = packet.size();
+  while (true) {
+    const auto result = ::writev(device_.get(), vectors.data(), 2);
+    if (result >= 0) {
+      stats_.tx_bytes += packet.size();
+      ++stats_.tx_frames;
+      return packet.size();
+    }
+    if (errno == EINTR) continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return std::unexpected(TunError::would_block);
+    ++stats_.tx_errors;
+    return std::unexpected(TunError::write_failed);
+  }
+}
+
+std::expected<std::size_t, TunError> TunDevice::write_vectored(
+    std::span<const std::byte> header, std::span<const std::byte> head,
+    std::span<const std::span<const std::byte>> payloads) {
+  if (!device_.valid()) return std::unexpected(TunError::not_open);
+  std::array<iovec, 68> vectors{};
+  std::size_t used = 0;
+  std::size_t total = 0;
+  const auto push = [&](std::span<const std::byte> piece) {
+    if (piece.empty() || used == vectors.size()) return;
+    vectors[used].iov_base = const_cast<std::byte*>(piece.data());
+    vectors[used].iov_len = piece.size();
+    ++used;
+  };
+  if (offload_) push(header);
+  push(head);
+  total += head.size();
+  for (const auto piece : payloads) {
+    push(piece);
+    total += piece.size();
+  }
+  while (true) {
+    const auto result = ::writev(device_.get(), vectors.data(), static_cast<int>(used));
+    if (result >= 0) {
+      stats_.tx_bytes += total;
+      ++stats_.tx_frames;
+      return total;
+    }
+    if (errno == EINTR) continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) return std::unexpected(TunError::would_block);
+    ++stats_.tx_errors;
+    return std::unexpected(TunError::write_failed);
+  }
+}
+
 std::expected<std::size_t, TunError> TunDevice::write_frame(std::span<const std::byte> frame) {
   if (!device_.valid()) return std::unexpected(TunError::not_open);
+  if (offload_) {
+    const std::array<std::byte, kVirtioHeaderSize> header{};
+    if (frame.empty() || frame.size() > kMaximumOffloadFrame) {
+      return std::unexpected(TunError::frame_too_large);
+    }
+    return write_offloaded(header, frame);
+  }
   if (frame.empty()) return std::unexpected(TunError::write_failed);
   if (frame.size() > kMaximumFrameSize) {
     ++stats_.oversized;
@@ -226,5 +324,4 @@ std::expected<std::uint16_t, TunError> TunDevice::mtu() const noexcept {
 }
 
 #endif
-
 }

@@ -19,7 +19,6 @@ namespace {
   if (value == 0 || value > 65'535) return std::unexpected(Error::malformed_packet);
   return static_cast<std::uint16_t>(value);
 }
-
 }
 
 std::string Endpoint::to_string() const {
@@ -64,5 +63,4 @@ std::expected<Endpoint, Error> parse_endpoint(std::string_view text) noexcept {
   if (!port) return std::unexpected(port.error());
   return Endpoint{*address, *port};
 }
-
 }

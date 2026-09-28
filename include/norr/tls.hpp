@@ -74,5 +74,4 @@ class TlsSession {
   std::unique_ptr<Impl> impl_;
   bool established_{};
 };
-
 }

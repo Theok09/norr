@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(norr VERSION 0.1.0 LANGUAGES CXX)
+project(norr VERSION 0.2.0 LANGUAGES CXX)
 
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/check.hpp)
     set(NORR_TESTS_DEFAULT ON)
@@ -8,15 +8,23 @@ else()
     set(NORR_TESTS_DEFAULT OFF)
 endif()
 option(NORR_BUILD_TESTS "Build unit tests" ${NORR_TESTS_DEFAULT})
-# libsodium supplies X25519 and ChaCha20-Poly1305. It is required for the real
-# datapath; without it the crypto layer reports unsupported_platform, exactly as
-# the socket and TUN layers do off Linux, so the project stays buildable on a
-# development machine without pretending the tunnel works there.
 option(NORR_USE_LIBSODIUM "Build the libsodium-backed crypto layer" ON)
 option(NORR_BUILD_FUZZERS "Build libFuzzer targets (Clang only)" OFF)
 option(NORR_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
-# ThreadSanitizer is separate because it cannot be combined with AddressSanitizer.
 option(NORR_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+
+option(NORR_STATIC "Link a fully static executable" OFF)
+
+macro(norr_link_package prefix)
+    if(NORR_STATIC AND ${prefix}_STATIC_LIBRARIES)
+        target_link_libraries(norr_core PUBLIC ${${prefix}_STATIC_LIBRARIES})
+        if(${prefix}_STATIC_LIBRARY_DIRS)
+            target_link_directories(norr_core PUBLIC ${${prefix}_STATIC_LIBRARY_DIRS})
+        endif()
+    else()
+        target_link_libraries(norr_core PUBLIC ${${prefix}_LIBRARIES})
+    endif()
+endmacro()
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -46,6 +54,8 @@ add_library(norr_core
     src/metrics.cpp
     src/notify.cpp
     src/noise.cpp
+    src/offload.cpp
+    src/parallel.cpp
     src/nonce.cpp
     src/pacer.cpp
     src/path_selector.cpp
@@ -89,14 +99,10 @@ if(NORR_USE_LIBSODIUM)
     if(SODIUM_FOUND)
         target_compile_definitions(norr_core PUBLIC NORR_HAVE_LIBSODIUM=1)
         target_include_directories(norr_core PUBLIC ${SODIUM_INCLUDE_DIRS})
-        # pkg-config reports the library name and its directory separately.
-        # Passing only the name leaves the linker unable to find a libsodium
-        # outside the default search path, which is the normal case for
-        # Homebrew, so the search directories must be passed too.
         if(SODIUM_LIBRARY_DIRS)
             target_link_directories(norr_core PUBLIC ${SODIUM_LIBRARY_DIRS})
         endif()
-        target_link_libraries(norr_core PUBLIC ${SODIUM_LIBRARIES})
+        norr_link_package(SODIUM)
         message(STATUS "libsodium found: crypto layer enabled")
     else()
         message(WARNING
@@ -105,12 +111,20 @@ if(NORR_USE_LIBSODIUM)
     endif()
 endif()
 
-# GnuTLS provides TLS 1.3 for the TCP carrier. Optional: without it the TLS
-# layer reports `unsupported` exactly as the QUIC adapter does, so the project
-# still builds on a machine that lacks it.
+option(NORR_USE_OPENSSL "Use OpenSSL for datapath AEAD" ON)
+if(NORR_USE_OPENSSL)
+    if(NORR_STATIC)
+        set(OPENSSL_USE_STATIC_LIBS TRUE)
+    endif()
+    find_package(OpenSSL 3.0 QUIET COMPONENTS Crypto)
+    if(OpenSSL_FOUND)
+        target_compile_definitions(norr_core PUBLIC NORR_HAVE_OPENSSL=1)
+        target_link_libraries(norr_core PUBLIC OpenSSL::Crypto)
+        message(STATUS "OpenSSL found: datapath AEAD uses OpenSSL")
+    endif()
+endif()
+
 option(NORR_USE_GNUTLS "Build the GnuTLS-backed TLS layer" ON)
-# ngtcp2 provides QUIC v1. It needs GnuTLS for its crypto callbacks, so it is
-# only attempted when the TLS layer is also enabled.
 option(NORR_USE_NGTCP2 "Build the ngtcp2-backed QUIC layer" ON)
 if(NORR_USE_GNUTLS)
     find_package(PkgConfig QUIET)
@@ -123,7 +137,7 @@ if(NORR_USE_GNUTLS)
         if(GNUTLS_LIBRARY_DIRS)
             target_link_directories(norr_core PUBLIC ${GNUTLS_LIBRARY_DIRS})
         endif()
-        target_link_libraries(norr_core PUBLIC ${GNUTLS_LIBRARIES})
+        norr_link_package(GNUTLS)
         message(STATUS "GnuTLS found: TLS layer enabled")
     else()
         message(WARNING "GnuTLS not found: the TLS layer will report unsupported")
@@ -145,7 +159,8 @@ if(NORR_USE_NGTCP2 AND GNUTLS_FOUND)
         if(NGTCP2_GNUTLS_LIBRARY_DIRS)
             target_link_directories(norr_core PUBLIC ${NGTCP2_GNUTLS_LIBRARY_DIRS})
         endif()
-        target_link_libraries(norr_core PUBLIC ${NGTCP2_LIBRARIES} ${NGTCP2_GNUTLS_LIBRARIES})
+        norr_link_package(NGTCP2_GNUTLS)
+        norr_link_package(NGTCP2)
         message(STATUS "ngtcp2 found: QUIC layer enabled")
     else()
         message(STATUS "ngtcp2 not found: QUIC reports unsupported")
@@ -179,31 +194,23 @@ if(NORR_ENABLE_TSAN)
     target_link_libraries(norr_core PUBLIC norr_tsan)
 endif()
 
-add_executable(norr src/main.cpp)
-target_link_libraries(norr PRIVATE norr_core)
-
+add_executable(norrd src/main.cpp)
+target_link_libraries(norrd PRIVATE norr_core)
+if(NORR_STATIC)
+    target_link_options(norrd PRIVATE -static)
+    set_target_properties(norrd PROPERTIES LINK_SEARCH_START_STATIC ON LINK_SEARCH_END_STATIC ON)
+endif()
 
 include(GNUInstallDirs)
 
-install(TARGETS norr RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-
-install(PROGRAMS scripts/norr-quick DESTINATION ${CMAKE_INSTALL_BINDIR})
-
-install(FILES deployment/norr.toml.example
-        DESTINATION ${CMAKE_INSTALL_DOCDIR}
-        RENAME norr.toml.example)
-
-install(FILES README.md docs/known-limitations.md
-        DESTINATION ${CMAKE_INSTALL_DOCDIR})
-
-install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR})
-
-install(FILES deployment/systemd/norr.service
-        DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/systemd/system)
+install(TARGETS norrd RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(PROGRAMS scripts/norr DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(PROGRAMS scripts/norr-quick DESTINATION ${CMAKE_INSTALL_LIBDIR}/norr)
+install(FILES deployment/systemd/norr@.service DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/systemd/system)
+install(FILES README.md LICENSE docs/configuration.md DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
 if(NORR_BUILD_TESTS)
     enable_testing()
-    # Test targets include "check.hpp" from tests/ by plain name.
     add_library(tests_support INTERFACE)
     target_include_directories(tests_support INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
     add_executable(norr_unit_tests tests/packet_test.cpp)
@@ -273,6 +280,9 @@ if(NORR_BUILD_TESTS)
     add_executable(norr_qos_tests tests/qos_test.cpp)
     target_link_libraries(norr_qos_tests PRIVATE norr_core tests_support)
     add_test(NAME norr_qos_tests COMMAND norr_qos_tests)
+    add_executable(norr_offload_tests tests/offload_test.cpp)
+    target_link_libraries(norr_offload_tests PRIVATE norr_core tests_support)
+    add_test(NAME norr_offload_tests COMMAND norr_offload_tests)
     add_executable(norr_fec_tests tests/fec_test.cpp)
     target_link_libraries(norr_fec_tests PRIVATE norr_core tests_support)
     add_test(NAME norr_fec_tests COMMAND norr_fec_tests)
@@ -300,15 +310,10 @@ if(NORR_BUILD_TESTS)
     add_executable(norr_worker_tests tests/worker_test.cpp)
     target_link_libraries(norr_worker_tests PRIVATE norr_core tests_support)
     add_test(NAME norr_worker_tests COMMAND norr_worker_tests)
-    # Exercises real sockets and, where permitted, a real TUN device. On a
-    # non-Linux host it verifies that every entry point reports
-    # unsupported_platform instead of pretending to work.
     add_executable(norr_datapath_tests tests/datapath_test.cpp)
     target_link_libraries(norr_datapath_tests PRIVATE norr_core tests_support)
     add_test(NAME norr_datapath_tests COMMAND norr_datapath_tests)
 
-    # Replaces global operator new to count allocations, so it must not be
-    # linked with anything that allocates for its own reasons.
     add_executable(norr_notify_tests tests/notify_test.cpp)
     target_link_libraries(norr_notify_tests PRIVATE norr_core tests_support)
     add_test(NAME norr_notify_tests COMMAND norr_notify_tests)
@@ -325,80 +330,83 @@ if(NORR_BUILD_TESTS)
     target_link_libraries(norr_alloc_tests PRIVATE norr_core tests_support)
     add_test(NAME norr_alloc_tests COMMAND norr_alloc_tests)
 
-    # Two nodes in separate network namespaces carrying real ICMP over a real
-    # TUN device. This is the only test that exercises `norr run` — every other
-    # test drives the library directly, so without it the binary could stop
-    # tunnelling and the suite would still pass.
-    #
-    # Needs Linux, root and CAP_NET_ADMIN, so it reports "skipped" rather than
-    # failing on a developer machine that cannot provide them.
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_test(NAME norr_e2e_tunnel
-                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norr>
+                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norrd>
                          bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_tunnel.sh)
         set_tests_properties(norr_e2e_tunnel PROPERTIES
             SKIP_RETURN_CODE 77
             TIMEOUT 120)
 
         add_test(NAME norr_e2e_tcp
-                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norr>
+                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norrd>
                          bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_tcp.sh)
         set_tests_properties(norr_e2e_tcp PROPERTIES
             SKIP_RETURN_CODE 77
             TIMEOUT 120)
 
         add_test(NAME norr_e2e_quic
-                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norr>
+                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norrd>
                          bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_quic.sh)
         set_tests_properties(norr_e2e_quic PROPERTIES
             SKIP_RETURN_CODE 77
             TIMEOUT 120)
 
         add_test(NAME norr_e2e_multipeer
-                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norr>
+                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norrd>
                          bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_multipeer.sh)
         set_tests_properties(norr_e2e_multipeer PROPERTIES
             SKIP_RETURN_CODE 77
             TIMEOUT 180)
 
         add_test(NAME norr_e2e_fec
-                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norr>
+                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norrd>
                          bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_fec.sh)
         set_tests_properties(norr_e2e_fec PROPERTIES
             SKIP_RETURN_CODE 77
             TIMEOUT 180)
 
         add_test(NAME norr_e2e_ipv6
-                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norr>
+                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norrd>
                          bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_ipv6.sh)
         set_tests_properties(norr_e2e_ipv6 PROPERTIES
             SKIP_RETURN_CODE 77
             TIMEOUT 120)
 
         add_test(NAME norr_e2e_fallback
-                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norr>
+                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norrd>
                          bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_fallback.sh)
         set_tests_properties(norr_e2e_fallback PROPERTIES
             SKIP_RETURN_CODE 77
             TIMEOUT 300)
+
+        if(NORR_ENABLE_SANITIZERS OR NORR_ENABLE_TSAN)
+            set(NORR_E2E_BULK 0)
+        else()
+            set(NORR_E2E_BULK 1)
+        endif()
+        add_test(NAME norr_e2e_forward
+                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norrd>
+                         sh ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_forward.sh)
+        set_tests_properties(norr_e2e_forward PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 120)
+        add_test(NAME norr_e2e_gateway
+                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norrd> NORR_E2E_BULK=${NORR_E2E_BULK}
+                         sh ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_gateway.sh)
+        set_tests_properties(norr_e2e_gateway PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 180)
     endif()
 endif()
 
-# The benchmark harness is a separate executable, not a test: it reports
-# distributions rather than asserting, and a debug build's figures are not
-# comparable to a release build's.
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/bench/main.cpp)
     add_executable(norr_bench bench/main.cpp)
     target_link_libraries(norr_bench PRIVATE norr_core)
 
-    # End-to-end benchmark: two real nodes over real sockets, covering the
-    # gates in performance/acceptance-gates.md that per-component timing
-    # cannot reach.
     add_executable(norr_bench_e2e bench/end_to_end.cpp)
     target_link_libraries(norr_bench_e2e PRIVATE norr_core)
 
-    # Gates E and F: impairment applied by tc netem on a veth pair, so delay
-    # and loss are real rather than simulated in the harness.
     add_executable(norr_bench_netem bench/netem.cpp)
     target_link_libraries(norr_bench_netem PRIVATE norr_core)
 endif()
@@ -411,10 +419,6 @@ if(NORR_BUILD_FUZZERS)
         message(WARNING "Xcode does not ship the libFuzzer runtime; building a deterministic parser smoke-fuzzer instead. Real coverage-guided fuzzing runs in CI on Linux.")
         add_executable(norr_packet_fuzz fuzz/packet_fuzz_smoke.cpp)
         target_link_libraries(norr_packet_fuzz PRIVATE norr_core)
-        # The libFuzzer entry points still compile here, driven deterministically,
-        # so a macOS build cannot silently rot while only CI exercises them.
-        # Each entry point defines LLVMFuzzerTestOneInput, so each needs its own
-        # binary rather than being linked together.
         foreach(fuzz_parser handshake_frame config ip_packet noise tcp_frame fec)
             add_executable(norr_${fuzz_parser}_smoke fuzz/parser_smoke.cpp fuzz/${fuzz_parser}_fuzz.cpp)
             target_link_libraries(norr_${fuzz_parser}_smoke PRIVATE norr_core)

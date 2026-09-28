@@ -38,5 +38,4 @@ struct KeyLabel {
 [[nodiscard]] std::expected<KeyLabel, Error> make_key_label(std::string_view domain,
                                                             KeyDirection direction,
                                                             KeyGeneration generation) noexcept;
-
 }

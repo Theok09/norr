@@ -86,5 +86,4 @@ std::vector<BackendReport> probe_io_backends() {
   return reports;
 #endif
 }
-
 }

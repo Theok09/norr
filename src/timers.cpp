@@ -9,7 +9,6 @@ namespace {
 constexpr auto later_first = [](const TimerEvent& left, const TimerEvent& right) noexcept {
   return left.due > right.due;
 };
-
 }
 
 Duration retry_backoff(std::uint32_t attempt) noexcept {
@@ -56,5 +55,4 @@ std::vector<TimerEvent> TimerWheel::expire(Instant now) {
 Instant TimerWheel::next_due() const noexcept {
   return timers_.empty() ? Instant{} : timers_.front().due;
 }
-
 }

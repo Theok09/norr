@@ -9,6 +9,7 @@
 #include "norr/config.hpp"
 #include "norr/crypto.hpp"
 #include "norr/notify.hpp"
+#include "norr/packet.hpp"
 #include "norr/privilege.hpp"
 #include "norr/quic_transport.hpp"
 #include "norr/runtime.hpp"
@@ -18,11 +19,11 @@
 #include "norr/worker.hpp"
 
 namespace {
-constexpr std::string_view kVersion = "0.1.0";
+constexpr std::string_view kVersion = "0.2.0";
 
 int usage() {
   std::fputs(
-      "usage: norr <command>\n"
+      "usage: norrd <command>\n"
       "\n"
       "  run\n"
       "  check\n"
@@ -36,7 +37,7 @@ int usage() {
 }
 
 int wrong_usage(std::string_view form) {
-  std::fprintf(stderr, "usage: norr %s\n", std::string{form}.c_str());
+  std::fprintf(stderr, "usage: norrd %s\n", std::string{form}.c_str());
   return 2;
 }
 
@@ -93,6 +94,13 @@ int run(const std::string& path) {
   }
 
   static_cast<void>(norr::disable_core_dumps());
+
+  const std::string user = config->user.empty() ? std::string{"nobody"} : config->user;
+  if (const auto dropped = norr::drop_privileges(user, true); !dropped) {
+    std::fprintf(stderr, "privileges: %s\n",
+                 std::string{norr::privilege_error_message(dropped.error())}.c_str());
+    if (!config->user.empty() && dropped.error() != norr::PrivilegeError::unsupported) return 1;
+  }
   static_cast<void>(norr::set_no_new_privileges());
 
   g_runtime = &runtime;
@@ -106,8 +114,6 @@ int run(const std::string& path) {
               config->listen_port, runtime.peer_count());
   std::fflush(stdout);
 
-  // The UDP carrier can send immediately. A TCP carrier dials once its
-  // connection and TLS handshake are up, from inside the loop.
   const auto dialed = runtime.active_transport() == norr::TransportKind::udp
                           ? runtime.dial_configured_peers()
                           : 0;
@@ -181,16 +187,25 @@ int interface_plan(const std::string& path) {
 
   std::printf("tun %s\n", config->tun_name.c_str());
   std::printf("port %u\n", config->listen_port);
-  if (config->network.mtu != norr::kAutomaticMtu) {
-    std::printf("mtu %u\n", config->network.mtu);
-  }
+  std::printf("mtu %u\n", config->network.mtu != norr::kAutomaticMtu
+                             ? static_cast<unsigned>(config->network.mtu)
+                             : static_cast<unsigned>(norr::kDefaultTunnelMtu));
+  if (config->network.fwmark != 0) std::printf("fwmark %u\n", config->network.fwmark);
+  if (config->network.forward) std::printf("gateway yes\n");
   for (const auto& address : config->network.addresses) {
     std::printf("address %s\n", address.c_str());
   }
   for (const auto& peer : config->peers) {
+    if (!peer.routes) continue;
     for (const auto& prefix : peer.allowed_ips) {
       std::printf("route %s\n", prefix.c_str());
     }
+  }
+  if (config->network.return_via_tunnel) std::printf("returnpath %u\n", config->listen_port);
+  for (const auto& forward : config->forwards) {
+    const char* mode = forward.preserve_source ? "preserve" : "nat";
+    if (forward.tcp) std::printf("forward tcp %u %s %s\n", forward.port, forward.target.c_str(), mode);
+    if (forward.udp) std::printf("forward udp %u %s %s\n", forward.port, forward.target.c_str(), mode);
   }
   return 0;
 }
@@ -233,17 +248,17 @@ int hardening() {
   std::printf("root       %s\n", state.root ? "yes" : "no");
   std::printf("core dumps %s\n", state.core_dumps_disabled ? "disabled" : "enabled");
   std::printf("no-new-priv %s\n", state.no_new_privileges ? "yes" : "no");
+  std::printf("net-admin  %s\n", norr::has_net_admin() ? "yes" : "no");
 
   return state.root ? 1 : 0;
 }
-
 }
 
 int main(int argc, char* argv[]) {
   if (argc < 2) return usage();
   const std::string_view command{argv[1]};
 
-  if (command == "version") return argc == 2 ? (std::printf("norr %s\n", kVersion.data()), 0)
+  if (command == "version") return argc == 2 ? (std::printf("norrd %s\n", kVersion.data()), 0)
                                              : wrong_usage("version");
   if (command == "run") return argc == 3 ? run(argv[2]) : wrong_usage("run <file>");
   if (command == "check") return argc == 3 ? check(argv[2]) : wrong_usage("check <file>");

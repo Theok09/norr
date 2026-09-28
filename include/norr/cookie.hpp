@@ -122,5 +122,4 @@ class CookieHolder {
   Instant received_{};
   bool has_cookie_{};
 };
-
 }

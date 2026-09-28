@@ -70,6 +70,8 @@ class Scheduler {
 
   [[nodiscard]] std::optional<QueuedPacket> dequeue(Instant now);
 
+  void restore(QueuedPacket packet);
+
   [[nodiscard]] std::size_t depth(TrafficClass value) const noexcept {
     return queues_[static_cast<std::size_t>(value)].size();
   }
@@ -95,5 +97,4 @@ class Scheduler {
 
   SchedulerStats stats_{};
 };
-
 }

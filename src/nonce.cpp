@@ -18,5 +18,4 @@ std::expected<std::uint64_t, Error> PacketCounter::next() noexcept {
   else ++value_;
   return counter;
 }
-
 }

@@ -72,5 +72,4 @@ class Prefix {
 };
 
 [[nodiscard]] std::expected<Prefix, Error> parse_prefix(std::string_view text) noexcept;
-
 }

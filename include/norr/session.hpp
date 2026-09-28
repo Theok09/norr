@@ -90,11 +90,35 @@ class Session {
                                                               std::span<const std::byte> packet,
                                                               std::span<std::byte> out);
 
+  [[nodiscard]] std::expected<std::uint64_t, SessionError> reserve_counter();
+
+  [[nodiscard]] std::expected<std::size_t, SessionError> seal_reserved(
+      FrameType type, std::uint64_t counter, std::span<const std::byte> plaintext,
+      std::span<std::byte> out) const;
+
+  [[nodiscard]] std::expected<void, SessionError> check_window(std::uint64_t counter);
+
+  [[nodiscard]] std::expected<std::size_t, SessionError> decrypt(
+      const PacketView& view, std::span<const std::byte> packet, std::span<std::byte> out) const;
+
+  [[nodiscard]] std::expected<void, SessionError> commit(std::uint64_t counter);
+
+  void note_authentication_failure() noexcept;
+
   [[nodiscard]] const SessionStats& stats() const noexcept { return stats_; }
 
   [[nodiscard]] Instant last_received() const noexcept { return last_received_; }
 
   [[nodiscard]] bool has_received() const noexcept { return stats_.received > 0; }
+
+  void note_recovered() noexcept;
+
+  struct LossSample {
+    double raw{};
+    double residual{};
+  };
+
+  [[nodiscard]] std::optional<LossSample> take_loss_sample() noexcept;
 
   [[nodiscard]] Instant established_at() const noexcept { return established_at_; }
 
@@ -118,6 +142,10 @@ class Session {
   Instant last_received_{};
   Instant established_at_{std::chrono::steady_clock::now()};
   SessionStats stats_{};
+  std::uint64_t sample_base_{};
+  std::uint64_t sample_received_{};
+  std::uint64_t sample_recovered_{};
+  bool sample_primed_{};
 
   std::unique_ptr<std::mutex> guard_{std::make_unique<std::mutex>()};
 };
@@ -170,5 +198,4 @@ class SessionTable {
   std::uint64_t retired_receives_{};
   std::uint16_t next_key_id_{1};
 };
-
 }

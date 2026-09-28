@@ -98,6 +98,9 @@ class UdpTransport {
 
   static constexpr std::size_t kDefaultDatagramSize = 2048;
 
+  static constexpr std::size_t kCoalescedDatagramSize = 65536;
+  static constexpr std::size_t kMaximumSegments = 64;
+
   [[nodiscard]] static bool supported() noexcept;
 
   UdpTransport() = default;
@@ -113,6 +116,8 @@ class UdpTransport {
   void stop() noexcept;
 
   [[nodiscard]] bool started() const noexcept { return socket_.valid(); }
+
+  [[nodiscard]] std::expected<void, TransportError> set_mark(std::uint32_t mark);
   [[nodiscard]] int descriptor() const noexcept { return socket_.get(); }
 
   [[nodiscard]] std::expected<std::uint16_t, TransportError> local_port() const;
@@ -138,6 +143,7 @@ class UdpTransport {
 #endif
   OffloadCapabilities offloads_{};
   TransportStats stats_{};
+  std::vector<InboundDatagram> backlog_;
+  std::size_t backlog_next_{};
 };
-
 }

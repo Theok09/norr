@@ -53,5 +53,4 @@ Duration Pacer::delay_for(std::size_t bytes, Instant now) noexcept {
   const auto seconds = (needed - available_) / rate_;
   return std::chrono::duration_cast<Duration>(std::chrono::duration<double>(seconds));
 }
-
 }

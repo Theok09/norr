@@ -70,7 +70,16 @@ class TunDevice {
 
   [[nodiscard]] std::expected<void, TunError> open(std::string_view requested_name = {},
                                                    bool non_blocking = true,
-                                                   bool multiqueue = false);
+                                                   bool multiqueue = false, bool offload = false);
+
+  [[nodiscard]] bool offload_enabled() const noexcept { return offload_; }
+
+  [[nodiscard]] std::expected<std::size_t, TunError> write_offloaded(
+      std::span<const std::byte> header, std::span<const std::byte> packet);
+
+  [[nodiscard]] std::expected<std::size_t, TunError> write_vectored(
+      std::span<const std::byte> header, std::span<const std::byte> head,
+      std::span<const std::span<const std::byte>> payloads);
 
   [[nodiscard]] static std::expected<TunDevice, TunError> open_queue(std::string_view name,
                                                                      bool non_blocking = true);
@@ -98,7 +107,7 @@ class TunDevice {
   FileDescriptor device_;
   std::string name_;
   bool multiqueue_{};
+  bool offload_{};
   TunStats stats_{};
 };
-
 }

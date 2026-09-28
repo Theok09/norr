@@ -45,7 +45,6 @@ constexpr void write_u32(std::span<std::byte> out, std::size_t offset, std::uint
          (static_cast<std::uint32_t>(bytes[offset + 2]) << 8U) |
          static_cast<std::uint32_t>(bytes[offset + 3]);
 }
-
 }
 
 Mac keyed_mac(std::span<const std::byte> key, std::span<const std::byte> message) noexcept {
@@ -213,5 +212,4 @@ Mac CookieHolder::compute_mac2(std::span<const std::byte> message) const noexcep
   if (!has_cookie_) return Mac{};
   return keyed_mac(cookie_, message);
 }
-
 }

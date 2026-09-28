@@ -60,8 +60,21 @@ struct NetworkConfig {
   bool ipv4{true};
   bool ipv6{true};
   std::uint16_t mtu{kAutomaticMtu};
+  std::uint32_t fwmark{};
+  bool forward{false};
+  bool offload{true};
+  bool return_via_tunnel{false};
 
   std::vector<std::string> addresses;
+};
+
+struct ForwardEntry {
+  std::string name;
+  std::uint16_t port{};
+  std::string target;
+  bool tcp{true};
+  bool udp{true};
+  bool preserve_source{false};
 };
 
 struct PeerEntry {
@@ -70,6 +83,7 @@ struct PeerEntry {
   std::string preshared_key;
   std::string endpoint;
   std::vector<std::string> allowed_ips;
+  bool routes{true};
 };
 
 struct Config {
@@ -87,10 +101,11 @@ struct Config {
   bool metrics_enabled{false};
   std::string metrics_listen;
   std::string tun_name{"norr0"};
+  std::string user;
   std::vector<PeerEntry> peers;
+  std::vector<ForwardEntry> forwards;
 };
 
 [[nodiscard]] std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text);
 [[nodiscard]] std::expected<Config, ConfigDiagnostic> load_config_file(const std::string& path);
-
 }

@@ -38,5 +38,4 @@ struct NegotiatedCapabilities {
 
 [[nodiscard]] std::expected<NegotiatedCapabilities, NegotiationError> negotiate_capabilities(
     const CapabilityOffer& local, const CapabilityOffer& peer) noexcept;
-
 }

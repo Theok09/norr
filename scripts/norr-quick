@@ -1,15 +1,7 @@
 #!/bin/sh
-# Bring a Norr interface up or down from its configuration file.
-#
-# Norr itself never configures addresses or routes: that needs privileges the
-# daemon gives up at startup, so the split is deliberate. This script is the
-# other half — it asks `norr interface` what the configuration implies, then
-# applies it with ip(8).
-#
-# Modelled on wg-quick(8), which does the same job for WireGuard.
 set -eu
 
-NORR="${NORR:-norr}"
+NORR="${NORR:-norrd}"
 CONFIG_DIR="${NORR_CONFIG_DIR:-/etc/norr}"
 
 usage() {
@@ -22,8 +14,6 @@ die() {
   exit 1
 }
 
-# A bare name means /etc/norr/<name>.toml, the way wg-quick treats an
-# interface name. A path is used as given.
 resolve_config() {
   case "$1" in
     */*|*.toml) printf '%s' "$1" ;;
@@ -31,8 +21,6 @@ resolve_config() {
   esac
 }
 
-# The plan is whatever `norr interface` reports: one directive per line, so
-# this stays readable and the parsing cannot drift from the config format.
 read_plan() {
   "$NORR" interface "$1" || die "cannot read $1"
 }
@@ -43,6 +31,128 @@ plan_value() {
 
 plan_values() {
   printf '%s\n' "$2" | awk -v key="$1" '$1 == key { print $2 }'
+}
+
+tag() {
+  printf 'norr-%s' "$1"
+}
+
+each_iptables() {
+  for tool in iptables ip6tables; do
+    command -v "$tool" >/dev/null 2>&1 || continue
+    if ! "$@" "$tool"; then
+      [ "$tool" = ip6tables ] || die "$tool rules failed"
+      echo "norr-quick: ip6tables rules skipped" >&2
+    fi
+  done
+}
+
+add_filter_rules() {
+  tool=$2
+  "$tool" -I FORWARD -i "$1" -m comment --comment "$(tag "$1")" -j ACCEPT || return 1
+  "$tool" -I FORWARD -o "$1" -m comment --comment "$(tag "$1")" -j ACCEPT || return 1
+  "$tool" -t mangle -A FORWARD -o "$1" -p tcp --tcp-flags SYN,RST SYN \
+    -m comment --comment "$(tag "$1")" -j TCPMSS --clamp-mss-to-pmtu || return 1
+  "$tool" -t mangle -A FORWARD -i "$1" -p tcp --tcp-flags SYN,RST SYN \
+    -m comment --comment "$(tag "$1")" -j TCPMSS --clamp-mss-to-pmtu || return 1
+}
+
+add_exit_rules() {
+  tool=$3
+  "$tool" -t nat -A POSTROUTING -o "$2" -m comment --comment "$(tag "$1")" -j MASQUERADE || return 1
+  add_filter_rules "$1" "$tool"
+}
+
+remove_forward_rules() {
+  tool=$2
+  for table in nat filter mangle; do
+    "$tool" -t "$table" -S 2>/dev/null | grep -- "--comment $(tag "$1")" | sed 's/^-A /-D /' |
+      while read -r rule; do
+        eval "$tool -t $table $rule" 2>/dev/null || true
+      done
+  done
+}
+
+enable_forwarding() {
+  sysctl -q -w net.ipv4.ip_forward=1
+  sysctl -q -w net.ipv6.conf.all.forwarding=1 2>/dev/null || true
+  wan=$(ip route show default | awk '{for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit }}')
+  [ -n "$wan" ] || die "no default route: cannot choose an interface to NAT onto"
+  command -v iptables >/dev/null 2>&1 || die "network.forward needs iptables"
+  each_iptables add_exit_rules "$1" "$wan"
+}
+
+apply_forwards() {
+  tun=$1
+  forwards=$(printf '%s\n' "$2" | awk '$1 == "forward" { print $2, $3, $4, $5 }')
+  [ -n "$forwards" ] || return 0
+  command -v iptables >/dev/null 2>&1 || die "port forwarding needs iptables"
+  sysctl -q -w net.ipv4.ip_forward=1
+  need_v6=no
+  while read -r protocol port target mode; do
+    case "$target" in
+      \[*)
+        tool=ip6tables
+        host=${target%]:*}
+        host=${host#[}
+        target_port=${target##*]:}
+        destination="[$host]:$target_port"
+        need_v6=yes
+        ;;
+      *)
+        tool=iptables
+        host=${target%:*}
+        target_port=${target##*:}
+        destination="$host:$target_port"
+        ;;
+    esac
+    command -v "$tool" >/dev/null 2>&1 || die "forward to $target needs $tool"
+    "$tool" -t nat -A PREROUTING ! -i "$tun" -m addrtype --dst-type LOCAL -p "$protocol" \
+      --dport "$port" -m comment --comment "$(tag "$tun")" -j DNAT --to-destination "$destination" \
+      || die "cannot forward $protocol/$port"
+    if [ "$mode" != preserve ] || [ "$protocol" = udp ]; then
+      "$tool" -t nat -A POSTROUTING -o "$tun" -p "$protocol" -d "$host" --dport "$target_port" \
+        -m comment --comment "$(tag "$tun")" -j MASQUERADE || die "cannot masquerade $protocol/$port"
+    fi
+  done <<FORWARDS
+$forwards
+FORWARDS
+  [ "$need_v6" = yes ] && sysctl -q -w net.ipv6.conf.all.forwarding=1
+  each_iptables add_filter_rules "$tun"
+}
+
+apply_return_path() {
+  tun=$1
+  mark=$(plan_value returnpath "$2")
+  [ -n "$mark" ] || return 0
+  for family in 4 6; do
+    tool=iptables
+    [ "$family" = 6 ] && tool=ip6tables
+    command -v "$tool" >/dev/null 2>&1 || continue
+    "$tool" -t mangle -A PREROUTING -i "$tun" -m conntrack --ctstate NEW \
+      -m comment --comment "$(tag "$tun")" -j CONNMARK --set-mark "$mark" || continue
+    "$tool" -t mangle -A PREROUTING -i "$tun" -m connmark --mark "$mark" \
+      -m comment --comment "$(tag "$tun")" -j MARK --set-mark "$mark"
+    "$tool" -t mangle -A OUTPUT -m connmark --mark "$mark" \
+      -m comment --comment "$(tag "$tun")" -j MARK --set-mark "$mark"
+    "$tool" -t mangle -A PREROUTING ! -i "$tun" -m connmark --mark "$mark" \
+      -m comment --comment "$(tag "$tun")" -j MARK --set-mark "$mark"
+    ip -"$family" rule add fwmark "$mark" table "$mark" priority 31000 2>/dev/null || true
+    ip -"$family" route replace default dev "$tun" table "$mark" 2>/dev/null || true
+  done
+  sysctl -q -w "net.ipv4.conf.$tun.src_valid_mark=1"
+  sysctl -q -w net.ipv4.tcp_fwmark_accept=1
+  sysctl -q -w net.ipv4.fwmark_reflect=1
+  sysctl -q -w net.ipv6.fwmark_reflect=1 2>/dev/null || true
+}
+
+remove_return_path() {
+  mark=$(plan_value returnpath "$1")
+  [ -n "$mark" ] || return 0
+  for family in 4 6; do
+    while ip -"$family" rule del fwmark "$mark" table "$mark" 2>/dev/null; do :; done
+    ip -"$family" route flush table "$mark" 2>/dev/null || true
+  done
 }
 
 cmd_up() {
@@ -57,14 +167,10 @@ cmd_up() {
     die "$tun already exists; run 'norr-quick down $1' first"
   fi
 
-  # The daemon creates the device, so it starts before anything can be
-  # configured on it.
-  "$NORR" run "$config" &
+  log="/var/log/norr-$tun.log"
+  setsid "$NORR" run "$config" </dev/null >>"$log" 2>&1 &
   daemon=$!
 
-  # Wait for the device rather than sleeping a fixed time: startup includes
-  # reading a key and binding a socket, and a fixed delay is either too short
-  # on a loaded machine or wasted on an idle one.
   attempt=0
   while [ "$attempt" -lt 100 ]; do
     if ip link show "$tun" >/dev/null 2>&1; then break; fi
@@ -91,14 +197,29 @@ cmd_up() {
 
   ip link set "$tun" up
 
-  # A peer's allowed_ips are its routes, exactly as in WireGuard's cryptokey
-  # routing: the same list that authorises a source is what directs traffic.
+  mark=$(plan_value fwmark "$plan")
   for route in $(plan_values route "$plan"); do
+    family=-4
+    case "$route" in *:*) family=-6 ;; esac
     case "$route" in
-      *:*) ip -6 route add "$route" dev "$tun" 2>/dev/null || true ;;
-      *)   ip route add "$route" dev "$tun" 2>/dev/null || true ;;
+      0.0.0.0/0|::/0)
+        [ -n "$mark" ] || die "$route needs network.fwmark so the tunnel's own packets bypass it"
+        ip "$family" route replace "$route" dev "$tun" table "$mark"
+        ip "$family" rule add not fwmark "$mark" table "$mark" priority 32000
+        ip "$family" rule add table main suppress_prefixlength 0 priority 31999
+        ;;
+      *)
+        ip "$family" route replace "$route" dev "$tun" || die "cannot route $route via $tun"
+        ;;
     esac
   done
+
+  if [ "$(plan_value gateway "$plan")" = "yes" ]; then
+    enable_forwarding "$tun"
+  fi
+
+  apply_forwards "$tun" "$plan"
+  apply_return_path "$tun" "$plan"
 
   echo "$daemon" > "/run/norr-$tun.pid" 2>/dev/null || true
   echo "$tun up"
@@ -114,17 +235,28 @@ cmd_down() {
   fi
   [ -n "$tun" ] || die "no interface name"
 
+  if [ -r "$config" ]; then
+    remove_return_path "$(read_plan "$config")"
+    mark=$(plan_value fwmark "$(read_plan "$config")")
+    if [ -n "$mark" ]; then
+      for family in -4 -6; do
+        while ip "$family" rule del not fwmark "$mark" table "$mark" 2>/dev/null; do :; done
+        while ip "$family" rule del table main suppress_prefixlength 0 2>/dev/null; do :; done
+        ip "$family" route flush table "$mark" 2>/dev/null || true
+      done
+    fi
+  fi
+  each_iptables remove_forward_rules "$tun"
+
   pidfile="/run/norr-$tun.pid"
   if [ -r "$pidfile" ]; then
     pid=$(cat "$pidfile")
     kill -TERM "$pid" 2>/dev/null || true
     rm -f "$pidfile"
   else
-    pkill -TERM -f "norr run .*$tun" 2>/dev/null || true
+    pkill -TERM -f "norrd run .*$tun" 2>/dev/null || true
   fi
 
-  # The daemon owns the device, so it disappears when the process does. The
-  # link is only removed explicitly if something left it behind.
   attempt=0
   while [ "$attempt" -lt 50 ]; do
     ip link show "$tun" >/dev/null 2>&1 || break

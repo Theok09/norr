@@ -18,7 +18,6 @@ namespace {
 
   return hash;
 }
-
 }
 
 void TokenBucket::refill(Instant now) noexcept {
@@ -61,5 +60,4 @@ bool SourceRateLimiter::allow(const Endpoint& source, Instant now) noexcept {
   ++rejected_;
   return false;
 }
-
 }

@@ -23,7 +23,6 @@ constexpr void append_u32(std::array<std::byte, 64>& bytes, std::size_t& size,
   }
   return true;
 }
-
 }
 
 std::expected<KeyLabel, Error> make_key_label(std::string_view domain, KeyDirection direction,
@@ -44,5 +43,4 @@ std::expected<KeyLabel, Error> make_key_label(std::string_view domain, KeyDirect
   append_u32(label.bytes, label.size, generation);
   return label;
 }
-
 }

@@ -30,5 +30,4 @@ class Endpoint {
 };
 
 [[nodiscard]] std::expected<Endpoint, Error> parse_endpoint(std::string_view text) noexcept;
-
 }

@@ -11,7 +11,6 @@ constexpr double kSmoothing = 0.3;
 [[nodiscard]] double smooth(double previous, double sample) noexcept {
   return previous + kSmoothing * (sample - previous);
 }
-
 }
 
 void Path::observe(const PathSample& sample, const PathThresholds& thresholds) {
@@ -124,12 +123,6 @@ bool PathSelector::evaluate(Instant now) {
 
   const auto must_move = !current->usable();
 
-  // A path that has never carried anything is unknown, not bad. While the
-  // active path still works there is no reason to gamble on one, but once it
-  // has failed an untried carrier is the only candidate there will ever be:
-  // nothing samples a carrier that is not selected, so waiting for it to
-  // become "usable" first is waiting forever. This is what makes falling back
-  // to TCP or QUIC possible when UDP is blocked outright.
   const Path* best = nullptr;
   for (std::size_t index = 0; index < count_; ++index) {
     const auto& candidate = paths_[index];
@@ -160,10 +153,6 @@ bool PathSelector::evaluate(Instant now) {
     }
   }
 
-  // The path being left is recorded as failed when that is why it was left.
-  // Only the active path is ever sampled, so an abandoned one would otherwise
-  // keep the state it had when it broke and be selected again immediately,
-  // which is how a fallback turns into a rotation.
   if (must_move) {
     if (auto* leaving = find(active_); leaving != nullptr) leaving->mark_failed();
   }
@@ -174,5 +163,4 @@ bool PathSelector::evaluate(Instant now) {
   if (must_move) ++stats_.failovers;
   return true;
 }
-
 }

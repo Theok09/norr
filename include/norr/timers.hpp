@@ -18,6 +18,8 @@ enum class TimerKind {
   session_expiry,
   path_probe,
   dead_peer,
+
+  provisional_timeout,
 };
 
 [[nodiscard]] constexpr std::string_view timer_kind_name(TimerKind kind) noexcept {
@@ -29,6 +31,7 @@ enum class TimerKind {
     case TimerKind::session_expiry: return "session_expiry";
     case TimerKind::path_probe: return "path_probe";
     case TimerKind::dead_peer: return "dead_peer";
+    case TimerKind::provisional_timeout: return "provisional_timeout";
   }
   return "unknown";
 }
@@ -44,28 +47,13 @@ inline constexpr auto kHandshakeRetryBase = std::chrono::milliseconds{500};
 inline constexpr auto kHandshakeRetryMax = std::chrono::seconds{30};
 inline constexpr auto kKeepaliveInterval = std::chrono::seconds{25};
 
-// How often transport health is judged, and how long a freshly selected
-// carrier is left alone to complete its own handshakes before it is judged at
-// all. The settle time has to exceed a TCP connect plus a TLS handshake plus a
-// Noise handshake, or a carrier is abandoned while it is still coming up.
 inline constexpr auto kTransportCheckInterval = std::chrono::seconds{5};
 inline constexpr auto kTransportSettleTime = std::chrono::seconds{15};
 
-// How long a peer may be silent before the carrier it is reached over is
-// judged unhealthy. This is deliberately far shorter than kDeadPeerTimeout:
-// dropping a session is destructive and waits ninety seconds to be sure, while
-// moving to another carrier is cheap and reversible, and waiting the same
-// ninety seconds would leave a blocked tunnel dark for a minute and a half.
 inline constexpr auto kTransportSilenceTimeout = std::chrono::seconds{15};
 
-// An echo reply claiming a longer round trip than this did not measure one:
-// the token predates a restart, or the clock moved. Such a reading is dropped
-// rather than allowed to distort the estimate.
 inline constexpr auto kMaximumPlausibleRtt = std::chrono::seconds{30};
 
-// How often congestion control reconsiders the sending rate. Frequent enough
-// to react within a few round trips on a real path, rare enough that a sample
-// covers more than a handful of packets.
 inline constexpr auto kCongestionSampleInterval = std::chrono::milliseconds{500};
 
 inline constexpr std::uint32_t kStallsBeforeFallback = 3;
@@ -100,5 +88,4 @@ class TimerWheel {
  private:
   std::vector<TimerEvent> timers_;
 };
-
 }

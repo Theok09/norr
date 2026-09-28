@@ -15,7 +15,6 @@
 #include "norr/file_descriptor.hpp"
 
 namespace norr {
-
 #if !defined(__linux__)
 
 bool notify_supervisor(std::string_view) noexcept { return false; }
@@ -58,5 +57,4 @@ bool notify_supervisor(std::string_view state) noexcept {
 bool notify_ready() noexcept { return notify_supervisor("READY=1"); }
 
 bool notify_stopping() noexcept { return notify_supervisor("STOPPING=1"); }
-
 }

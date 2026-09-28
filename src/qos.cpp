@@ -24,7 +24,6 @@ constexpr std::uint8_t kDscpClassSelector5 = 40;
   const auto low = static_cast<unsigned>(static_cast<std::uint8_t>(frame[1]) >> 4U);
   return static_cast<std::uint8_t>(((high << 4U) | low) >> 2U);
 }
-
 }
 
 TrafficClass classify(const IpPacketView& packet, std::span<const std::byte> frame) noexcept {
@@ -88,6 +87,15 @@ bool Scheduler::enqueue(std::vector<std::byte> packet, TrafficClass traffic_clas
   return true;
 }
 
+void Scheduler::restore(QueuedPacket packet) {
+  const auto index = static_cast<std::size_t>(packet.traffic_class);
+  queued_bytes_ += packet.bytes.size();
+  if (stats_.dequeued[index] > 0) --stats_.dequeued[index];
+  if (packet.traffic_class == TrafficClass::normal && normal_deficit_ > 0) --normal_deficit_;
+  if (packet.traffic_class == TrafficClass::bulk && bulk_deficit_ > 0) --bulk_deficit_;
+  queues_[index].push_front(std::move(packet));
+}
+
 std::optional<QueuedPacket> Scheduler::dequeue(Instant now) {
   const auto take = [&](TrafficClass traffic_class) -> std::optional<QueuedPacket> {
     const auto index = static_cast<std::size_t>(traffic_class);
@@ -138,5 +146,4 @@ std::optional<QueuedPacket> Scheduler::dequeue(Instant now) {
   bulk_deficit_ = 0;
   return take(TrafficClass::normal);
 }
-
 }

@@ -122,7 +122,6 @@ void random_cid(ngtcp2_cid& cid, std::size_t length) {
   gnutls_x509_privkey_deinit(x509_key);
   return ok;
 }
-
 }
 
 struct Ngtcp2Connection::Impl {
@@ -140,6 +139,7 @@ struct Ngtcp2Connection::Impl {
   socklen_t remote_length{};
 
   bool handshake_done{};
+  bool failed{};
 
   std::vector<std::byte> scratch = std::vector<std::byte>(kMinimumInitialDatagram * 2);
 
@@ -150,11 +150,22 @@ struct Ngtcp2Connection::Impl {
   std::vector<std::vector<std::byte>> ready;
   QuicStats stats{};
 
-  ~Impl() {
+  void reset() noexcept {
     if (conn != nullptr) ngtcp2_conn_del(conn);
     if (tls != nullptr) gnutls_deinit(tls);
     if (credentials != nullptr) gnutls_certificate_free_credentials(credentials);
+    conn = nullptr;
+    tls = nullptr;
+    credentials = nullptr;
+    handshake_done = false;
+    failed = false;
+    pending.clear();
+    received.clear();
+    ready.clear();
+    held.clear();
   }
+
+  ~Impl() { reset(); }
 };
 
 namespace {
@@ -214,7 +225,6 @@ void fill_callbacks(ngtcp2_callbacks& callbacks) {
   callbacks.rand = rand_callback;
   callbacks.get_new_connection_id = get_new_connection_id;
 }
-
 }
 
 Ngtcp2Connection::Ngtcp2Connection() : impl_(std::make_unique<Impl>()) {}
@@ -222,6 +232,7 @@ Ngtcp2Connection::~Ngtcp2Connection() = default;
 
 std::expected<void, QuicError> Ngtcp2Connection::connect(const Endpoint& peer) {
   if (impl_->conn != nullptr) return std::unexpected(QuicError::already_connected);
+  impl_->reset();
 
   if (gnutls_init(&impl_->tls, GNUTLS_CLIENT | GNUTLS_ENABLE_RAWPK) < 0) {
     return std::unexpected(QuicError::handshake_failed);
@@ -281,12 +292,14 @@ std::expected<void, QuicError> Ngtcp2Connection::connect(const Endpoint& peer) {
   ngtcp2_settings settings{};
   ngtcp2_settings_default(&settings);
   settings.initial_ts = now_timestamp();
+  settings.handshake_timeout = 10ULL * NGTCP2_SECONDS;
 
   ngtcp2_transport_params params{};
   ngtcp2_transport_params_default(&params);
 
   params.max_datagram_frame_size = kMaxDatagramFrame;
   params.initial_max_data = 1024 * 1024;
+  params.max_idle_timeout = 60ULL * NGTCP2_SECONDS;
 
   ngtcp2_callbacks callbacks{};
   fill_callbacks(callbacks);
@@ -303,12 +316,26 @@ std::expected<void, QuicError> Ngtcp2Connection::connect(const Endpoint& peer) {
 
 bool Ngtcp2Connection::established() const noexcept { return impl_->handshake_done; }
 
-void Ngtcp2Connection::close() noexcept {
-  if (impl_->conn != nullptr) {
-    ngtcp2_conn_del(impl_->conn);
-    impl_->conn = nullptr;
-  }
-  impl_->handshake_done = false;
+void Ngtcp2Connection::close() noexcept { impl_->reset(); }
+
+void Ngtcp2Connection::service_timers() {
+  if (impl_->conn == nullptr || impl_->failed) return;
+  const auto now = now_timestamp();
+  if (ngtcp2_conn_get_expiry(impl_->conn) > now) return;
+  if (ngtcp2_conn_handle_expiry(impl_->conn, now) != 0) impl_->failed = true;
+}
+
+bool Ngtcp2Connection::active() const noexcept { return impl_->conn != nullptr; }
+
+bool Ngtcp2Connection::broken() const noexcept {
+  if (impl_->conn == nullptr) return false;
+#if NGTCP2_VERSION_NUM >= 0x010000
+  return impl_->failed || ngtcp2_conn_in_closing_period(impl_->conn) != 0 ||
+         ngtcp2_conn_in_draining_period(impl_->conn) != 0;
+#else
+  return impl_->failed || ngtcp2_conn_is_in_closing_period(impl_->conn) != 0 ||
+         ngtcp2_conn_is_in_draining_period(impl_->conn) != 0;
+#endif
 }
 
 std::size_t Ngtcp2Connection::max_datagram_size() const noexcept {
@@ -359,11 +386,15 @@ std::expected<std::size_t, QuicError> Ngtcp2Connection::send_datagram(
       impl_->scratch.size(), &accepted, NGTCP2_WRITE_DATAGRAM_FLAG_NONE, 0, &vec, 1,
       now_timestamp());
 
-  if (written < 0) return std::unexpected(QuicError::send_failed);
+  if (written < 0) {
+    if (written == NGTCP2_ERR_CLOSING || written == NGTCP2_ERR_DRAINING) impl_->failed = true;
+    return std::unexpected(QuicError::send_failed);
+  }
+  if (written > 0) {
+    impl_->pending.emplace_back(impl_->scratch.begin(),
+                                impl_->scratch.begin() + static_cast<std::ptrdiff_t>(written));
+  }
   if (accepted == 0) return std::unexpected(QuicError::send_failed);
-
-  impl_->pending.emplace_back(impl_->scratch.begin(),
-                              impl_->scratch.begin() + static_cast<std::ptrdiff_t>(written));
 
   ++impl_->stats.datagrams_sent;
   impl_->stats.bytes_sent += payload.size();
@@ -385,8 +416,11 @@ std::expected<void, QuicError> Ngtcp2Connection::feed(std::span<const std::byte>
       datagram.size(), now_timestamp());
 
   if (result != 0) {
-    std::fprintf(stderr, "norr: ngtcp2 read_pkt failed: %s\n",
-                 ngtcp2_strerror(static_cast<int>(result)));
+    if (result == NGTCP2_ERR_DRAINING || result == NGTCP2_ERR_CLOSING ||
+        result == NGTCP2_ERR_DROP_CONN || result == NGTCP2_ERR_CRYPTO ||
+        result == NGTCP2_ERR_IDLE_CLOSE) {
+      impl_->failed = true;
+    }
     return std::unexpected(QuicError::receive_failed);
   }
   return {};
@@ -410,8 +444,7 @@ std::span<const std::byte> Ngtcp2Connection::next_outgoing() {
       impl_->scratch.size(), now_timestamp());
 
   if (written < 0) {
-    std::fprintf(stderr, "norr: ngtcp2 write_pkt failed: %s\n",
-                 ngtcp2_strerror(static_cast<int>(written)));
+    impl_->failed = true;
     return {};
   }
   if (written == 0) return {};
@@ -438,6 +471,7 @@ std::expected<void, QuicError> Ngtcp2Connection::accept(const Endpoint& local,
                                                         const Endpoint& peer,
                                                         std::span<const std::byte> initial) {
   if (impl_->conn != nullptr) return std::unexpected(QuicError::already_connected);
+  impl_->reset();
 
   ngtcp2_pkt_hd header{};
   const auto parsed = ngtcp2_accept(&header,
@@ -494,11 +528,13 @@ std::expected<void, QuicError> Ngtcp2Connection::accept(const Endpoint& local,
   ngtcp2_settings settings{};
   ngtcp2_settings_default(&settings);
   settings.initial_ts = now_timestamp();
+  settings.handshake_timeout = 10ULL * NGTCP2_SECONDS;
 
   ngtcp2_transport_params params{};
   ngtcp2_transport_params_default(&params);
   params.max_datagram_frame_size = kMaxDatagramFrame;
   params.initial_max_data = 1024 * 1024;
+  params.max_idle_timeout = 60ULL * NGTCP2_SECONDS;
 
   params.original_dcid = header.dcid;
 
@@ -518,6 +554,53 @@ std::expected<void, QuicError> Ngtcp2Connection::accept(const Endpoint& local,
   ++impl_->stats.handshakes;
 
   return feed(initial);
+}
+
+#else
+
+struct Ngtcp2Connection::Impl {
+  QuicStats stats{};
+};
+
+Ngtcp2Connection::Ngtcp2Connection() : impl_(std::make_unique<Impl>()) {}
+Ngtcp2Connection::~Ngtcp2Connection() = default;
+
+std::expected<void, QuicError> Ngtcp2Connection::connect(const Endpoint&) {
+  return std::unexpected(QuicError::unsupported);
+}
+
+bool Ngtcp2Connection::established() const noexcept { return false; }
+
+void Ngtcp2Connection::close() noexcept {}
+
+std::size_t Ngtcp2Connection::max_datagram_size() const noexcept { return 0; }
+
+const QuicStats& Ngtcp2Connection::stats() const noexcept { return impl_->stats; }
+
+std::expected<std::size_t, QuicError> Ngtcp2Connection::send_datagram(std::span<const std::byte>) {
+  return std::unexpected(QuicError::unsupported);
+}
+
+std::expected<void, QuicError> Ngtcp2Connection::feed(std::span<const std::byte>) {
+  return std::unexpected(QuicError::unsupported);
+}
+
+std::span<const std::byte> Ngtcp2Connection::next_outgoing() { return {}; }
+
+void Ngtcp2Connection::service_timers() {}
+
+bool Ngtcp2Connection::active() const noexcept { return false; }
+
+bool Ngtcp2Connection::broken() const noexcept { return false; }
+
+std::expected<std::size_t, QuicError> Ngtcp2Connection::receive_datagrams(
+    std::span<std::span<const std::byte>>) {
+  return std::unexpected(QuicError::unsupported);
+}
+
+std::expected<void, QuicError> Ngtcp2Connection::accept(const Endpoint&, const Endpoint&,
+                                                        std::span<const std::byte>) {
+  return std::unexpected(QuicError::unsupported);
 }
 
 #endif
@@ -573,5 +656,4 @@ std::expected<std::size_t, QuicError> LoopbackQuicConnection::receive_datagrams(
   stats_.datagrams_received += count;
   return count;
 }
-
 }

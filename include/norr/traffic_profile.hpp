@@ -12,7 +12,6 @@
 #include "norr/timers.hpp"
 
 namespace norr {
-
 enum class TrafficProfile : std::uint8_t { standard, quic, dns };
 
 [[nodiscard]] constexpr std::string_view traffic_profile_name(TrafficProfile profile) noexcept {
@@ -47,5 +46,4 @@ enum class TrafficProfile : std::uint8_t { standard, quic, dns };
 }
 
 inline constexpr auto kChaffInterval = std::chrono::milliseconds{250};
-
 }

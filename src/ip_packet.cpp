@@ -58,7 +58,6 @@ namespace {
       .total_length = total_length,
   };
 }
-
 }
 
 std::optional<std::size_t> declared_ip_length(std::span<const std::byte> bytes) noexcept {
@@ -116,5 +115,4 @@ bool is_loopback(const Address& address) noexcept {
   }
   return octets[15] == std::byte{1};
 }
-
 }

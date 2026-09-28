@@ -1,0 +1,519 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="0.2.0"
+NORRD="${NORRD:-norrd}"
+CONFIG_DIR="${NORR_CONFIG_DIR:-/etc/norr}"
+
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  R=$'\e[0m' B=$'\e[1m' ACCENT=$'\e[38;5;67m' GREEN=$'\e[38;5;71m' RED=$'\e[38;5;167m' GRAY=$'\e[38;5;244m'
+else
+  R="" B="" ACCENT="" GREEN="" RED="" GRAY=""
+fi
+
+fail() { printf 'norr: %s\n' "$*" >&2; exit 1; }
+out() { printf '%s\n' "$*"; }
+
+expand_flags() {
+  local argument
+  EXPANDED=()
+  for argument in "$@"; do
+    if [[ "$argument" == --*=* ]]; then
+      EXPANDED+=("${argument%%=*}" "${argument#*=}")
+    else
+      EXPANDED+=("$argument")
+    fi
+  done
+}
+
+require_root() { [[ $(id -u) -eq 0 ]] || fail "this command must be run as root"; }
+require_daemon() { command -v "$NORRD" >/dev/null 2>&1 || fail "norrd is not installed"; }
+
+config_of() { printf '%s/%s.toml' "$CONFIG_DIR" "$1"; }
+
+tunnels() {
+  local file
+  for file in "$CONFIG_DIR"/*.toml; do
+    [[ -e "$file" ]] && basename "$file" .toml
+  done
+  return 0
+}
+
+pick_tunnel() {
+  local requested=${1:-} list
+  if [[ -n "$requested" ]]; then
+    [[ -e "$(config_of "$requested")" ]] || fail "no tunnel named $requested"
+    printf '%s' "$requested"
+    return
+  fi
+  mapfile -t list < <(tunnels)
+  (( ${#list[@]} )) || fail "no tunnels; create one with 'norr server' or 'norr client'"
+  (( ${#list[@]} == 1 )) || fail "several tunnels exist; name one of: ${list[*]}"
+  printf '%s' "${list[0]}"
+}
+
+next_slot() {
+  local slot
+  for slot in $(seq 0 99); do
+    [[ -e "$(config_of "norr$slot")" ]] && continue
+    grep -qs "10\.99\.$slot\." "$CONFIG_DIR"/*.toml && continue
+    printf '%s' "$slot"
+    return
+  done
+  fail "no free tunnel slot"
+}
+
+local_ip() {
+  ip -4 route get 1.1.1.1 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }'
+}
+
+setting() { awk -F'"' -v key="$2" '$0 ~ "^" key " *=" { print $2; exit }' "$1"; }
+peer_address() { local value; value=$(setting "$1" allowed_ips); printf '%s' "${value%%/*}"; }
+
+random_hex() { head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
+to_binary() { printf '%s' "$1" | sed 's/../\\x&/g' | xargs -0 printf '%b'; }
+url_base64() { base64 -w0 | tr '+/' '-_' | tr -d '='; }
+
+ip_hex() {
+  local a b c d
+  IFS=. read -r a b c d <<<"${1:-0.0.0.0}"
+  printf '%02x%02x%02x%02x' "${a:-0}" "${b:-0}" "${c:-0}" "${d:-0}"
+}
+hex_ip() { printf '%d.%d.%d.%d' "0x${1:0:2}" "0x${1:2:2}" "0x${1:4:2}" "0x${1:6:2}"; }
+
+fec_code() { case "$1" in off) echo 0 ;; light) echo 1 ;; moderate) echo 2 ;; aggressive) echo 3 ;; *) echo 4 ;; esac; }
+fec_name() { case "$1" in 0) echo off ;; 1) echo light ;; 2) echo moderate ;; 3) echo aggressive ;; *) echo auto ;; esac; }
+
+forward_blocks() {
+  local ports=$1 target=$2 preserve=$3 port
+  IFS=',' read -r -a list <<<"$ports"
+  for port in "${list[@]}"; do
+    port=${port//[[:space:]]/}
+    [[ -z "$port" ]] && continue
+    [[ "$port" =~ ^[0-9]+$ ]] && (( port > 0 && port < 65536 )) || fail "invalid port: $port"
+    printf '\n[[forward]]\nlisten_port = %s\ntarget = "%s:%s"\npreserve_source = %s\n' \
+      "$port" "$target" "$port" "$preserve"
+  done
+}
+
+wait_for() {
+  local address=$1 attempt
+  for attempt in $(seq 1 40); do
+    ping -c1 -W1 "$address" >/dev/null 2>&1 && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+latency() { ping -c3 -W1 -q "$1" 2>/dev/null | awk -F/ '/rtt/ { printf "%.0f ms", $5 }'; }
+
+bytes() {
+  awk -v b="$1" 'BEGIN { split("B KB MB GB TB", u); i = 1; while (b >= 1024 && i < 5) { b /= 1024; i++ }
+    printf (i == 1 ? "%d %s" : "%.1f %s"), b, u[i] }'
+}
+
+start_service() { systemctl enable --now "norr@$1" >/dev/null 2>&1 || fail "the service did not start; run 'norr logs $1'"; }
+
+help_server() {
+  cat <<EOF
+USAGE
+  norr server [flags]
+
+Create a tunnel on this machine and print a join code for the client.
+
+FLAGS
+  --forward=<ports>
+    	ports to forward to the client, comma separated
+  --reverse
+    	connect to the client instead of waiting for it to connect
+  --client-ip=<ip>
+    	public address of the client, required with --reverse
+  --public-ip=<ip>
+    	public address of this server (default: detected)
+  --port=<port>
+    	UDP port for the tunnel (default 51820)
+  --no-real-ip
+    	translate client addresses instead of preserving them
+  --fec=<mode>
+    	forward error correction: auto, off, light, moderate or aggressive (default auto)
+  --name=<name>
+    	interface name (default norr0)
+EOF
+}
+
+cmd_server() {
+  local name="" port="" forwards="" direct=false peer_ip="" public_ip="" real_ip=true fec=auto
+  expand_flags "$@"; set -- "${EXPANDED[@]}"
+  while (( $# )); do
+    case "$1" in
+      --forward) forwards=$2; shift 2 ;;
+      --reverse) direct=true; shift ;;
+      --client-ip) peer_ip=$2; shift 2 ;;
+      --public-ip) public_ip=$2; shift 2 ;;
+      --port) port=$2; shift 2 ;;
+      --no-real-ip) real_ip=false; shift ;;
+      --fec) fec=$2; shift 2 ;;
+      --name) name=$2; shift 2 ;;
+      -h | --help) help_server; return ;;
+      *) fail "unknown flag $1; see 'norr server --help'" ;;
+    esac
+  done
+  require_root; require_daemon
+  [[ $direct == false || -n "$peer_ip" ]] || fail "--reverse needs --client-ip"
+
+  local slot; slot=$(next_slot)
+  name=${name:-norr$slot}
+  port=${port:-$((51820 + slot))}
+  [[ -e "$(config_of "$name")" ]] && fail "a tunnel named $name already exists"
+  public_ip=${public_ip:-$(local_ip)}
+  [[ -n "$public_ip" ]] || fail "could not detect this server's address; pass --public-ip"
+
+  mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR"
+  "$NORRD" keygen >"$CONFIG_DIR/$name.key" 2>"$CONFIG_DIR/$name.pub"
+  chmod 600 "$CONFIG_DIR/$name.key"
+  local own_public peer_private peer_public psk subnet="10.99.$slot"
+  own_public=$(awk '{print $2}' "$CONFIG_DIR/$name.pub")
+  peer_private=$("$NORRD" keygen 2>"$CONFIG_DIR/.peer.pub" | awk '{print $2}')
+  peer_public=$(awk '{print $2}' "$CONFIG_DIR/.peer.pub")
+  rm -f "$CONFIG_DIR/.peer.pub"
+  psk=$(random_hex)
+
+  {
+    printf '[node]\nrole = "server"\nlisten_port = %s\ntun = "%s"\n' "$port" "$name"
+    printf '\n[identity]\nkey_file = "%s/%s.key"\n' "$CONFIG_DIR" "$name"
+    printf '\n[network]\naddress = "%s.1/30"\n' "$subnet"
+    printf '\n[fec]\nmode = "%s"\n' "$fec"
+    printf '\n[[peer]]\nname = "client"\npublic_key = "%s"\npreshared_key = "%s"\nallowed_ips = "%s.2/32"\n' \
+      "$peer_public" "$psk" "$subnet"
+    if [[ $direct == true ]]; then printf 'endpoint = "%s:%s"\n' "$peer_ip" "$port"; fi
+    forward_blocks "$forwards" "$subnet.2" "$real_ip"
+  } >"$(config_of "$name")"
+  chmod 600 "$(config_of "$name")"
+  "$NORRD" check "$(config_of "$name")" >/dev/null || fail "the generated configuration is invalid"
+
+  local flags=0
+  [[ $direct == true ]] && flags=$((flags | 1))
+  [[ $real_ip == true ]] && flags=$((flags | 2))
+  local packed
+  packed=$(printf '02%02x%04x%02x%02x%s%s%s%s%s' "$flags" "$port" "$slot" "$(fec_code "$fec")" \
+    "$(ip_hex "$public_ip")" "$(ip_hex "$peer_ip")" "$own_public" "$peer_private" "$psk")
+  printf 'norr:%s\n' "$(to_binary "$packed" | url_base64)" >"$CONFIG_DIR/$name.code"
+  chmod 600 "$CONFIG_DIR/$name.code"
+
+  start_service "$name"
+
+  out "Server $name is online on UDP $port."
+  [[ -n "$forwards" ]] && out "Forwarding ports ${forwards//,/, } to the client at $subnet.2."
+  out ""
+  out "To connect the client, run on it:"
+  out ""
+  out "    ${B}norr client $(cat "$CONFIG_DIR/$name.code")${R}"
+  out ""
+  out "The join code contains the tunnel keys. Share it privately."
+}
+
+help_client() {
+  cat <<EOF
+USAGE
+  norr client [flags] <code>
+
+Connect this machine to a server using the join code printed by "norr server".
+
+FLAGS
+  --name=<name>
+    	interface name (default norr0)
+EOF
+}
+
+cmd_client() {
+  local code="" name=""
+  expand_flags "$@"; set -- "${EXPANDED[@]}"
+  while (( $# )); do
+    case "$1" in
+      --name) name=$2; shift 2 ;;
+      -h | --help) help_client; return ;;
+      -*) fail "unknown flag $1; see 'norr client --help'" ;;
+      *) code=$1; shift ;;
+    esac
+  done
+  require_root; require_daemon
+  [[ "$code" == norr:* ]] || fail "not a join code; it starts with 'norr:'"
+
+  local text=${code#norr:} hex
+  text=${text//-/+}; text=${text//_//}
+  while (( ${#text} % 4 )); do text+="="; done
+  hex=$(printf '%s' "$text" | base64 -d 2>/dev/null | od -An -tx1 | tr -d ' \n') || true
+  [[ ${#hex} -eq 220 && ${hex:0:2} == 02 ]] || fail "the join code is damaged or incomplete"
+
+  local flags port slot fec server_ip peer_ip server key psk subnet direct=false real_ip=false
+  flags=$((16#${hex:2:2}))
+  (( flags & 1 )) && direct=true
+  (( flags & 2 )) && real_ip=true
+  port=$((16#${hex:4:4}))
+  slot=$((16#${hex:8:2}))
+  fec=$(fec_name "$((16#${hex:10:2}))")
+  server_ip=$(hex_ip "${hex:12:8}")
+  peer_ip=$(hex_ip "${hex:20:8}")
+  server=${hex:28:64}; key=${hex:92:64}; psk=${hex:156:64}
+  subnet="10.99.$slot"
+
+  name=${name:-norr$(next_slot)}
+  [[ -e "$(config_of "$name")" ]] && fail "a tunnel named $name already exists"
+
+  mkdir -p "$CONFIG_DIR" && chmod 700 "$CONFIG_DIR"
+  printf 'private %s\n' "$key" >"$CONFIG_DIR/$name.key"
+  chmod 600 "$CONFIG_DIR/$name.key"
+  {
+    printf '[node]\nrole = "client"\nlisten_port = %s\ntun = "%s"\n' "$port" "$name"
+    printf '\n[identity]\nkey_file = "%s/%s.key"\n' "$CONFIG_DIR" "$name"
+    printf '\n[network]\naddress = "%s.2/30"\n' "$subnet"
+    if [[ $real_ip == true ]]; then printf 'return_via_tunnel = true\n'; fi
+    printf '\n[fec]\nmode = "%s"\n' "$fec"
+    printf '\n[[peer]]\nname = "server"\npublic_key = "%s"\npreshared_key = "%s"\n' "$server" "$psk"
+    if [[ $real_ip == true ]]; then
+      printf 'allowed_ips = "%s.1/32, 0.0.0.0/0, ::/0"\nroutes = false\n' "$subnet"
+    else
+      printf 'allowed_ips = "%s.1/32"\n' "$subnet"
+    fi
+    if [[ $direct == false ]]; then printf 'endpoint = "%s:%s"\n' "$server_ip" "$port"; fi
+  } >"$(config_of "$name")"
+  chmod 600 "$(config_of "$name")"
+  "$NORRD" check "$(config_of "$name")" >/dev/null || fail "the generated configuration is invalid"
+
+  start_service "$name"
+
+  if wait_for "$subnet.1"; then
+    out "Connected to server $server_ip ($(latency "$subnet.1"))."
+    out "Services on this machine are reachable from the server at $subnet.2."
+  else
+    out "Tunnel $name is running and waiting for server $server_ip."
+    out "Make sure UDP $port is reachable, then check 'norr status'."
+  fi
+}
+
+cmd_status() {
+  if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then
+    printf 'USAGE\n  norr status\n\nShow the state of every tunnel on this server.\n'
+    return
+  fi
+  local names; mapfile -t names < <(tunnels)
+  if (( ${#names[@]} == 0 )); then
+    out "No tunnels. Run \"norr server\" on the server, then \"norr client\" on the client."
+    return
+  fi
+  local rows=() name file own peer role state forwards
+  for name in "${names[@]}"; do
+    file=$(config_of "$name")
+    own=$(setting "$file" address); own=${own%/*}
+    peer=$(peer_address "$file")
+    role=$(setting "$file" role)
+    forwards=$(awk '/^\[\[forward\]\]/ { f = 1; next } /^\[/ { f = 0 } f && /^listen_port/ { printf "%s%s", s, $3; s = "," }' "$file")
+    if ip link show "$name" >/dev/null 2>&1; then
+      local rtt rx tx
+      rtt=$(latency "$peer")
+      rx=$(bytes "$(cat "/sys/class/net/$name/statistics/rx_bytes")")
+      tx=$(bytes "$(cat "/sys/class/net/$name/statistics/tx_bytes")")
+      if [[ -n "$rtt" ]]; then
+        state="${GREEN}active${R}; peer $peer, $rtt, tx $tx rx $rx"
+      else
+        state="${RED}waiting${R}; peer $peer unreachable, tx $tx rx $rx"
+      fi
+    else
+      state="${RED}offline${R}"
+    fi
+    [[ -n "$forwards" ]] && state+=", ports $forwards"
+    rows+=("$own|$name|$role|$state")
+  done
+  printf '%s\n' "${rows[@]}" | column -t -s '|'
+}
+
+help_forward() {
+  cat <<EOF
+USAGE
+  norr forward add [flags] <port>
+  norr forward rm [flags] <port>
+  norr forward ls [flags]
+
+Manage the ports the server forwards to the client.
+
+FLAGS
+  --to=<port>
+    	port on the client (default: the same port)
+  --tcp
+    	forward TCP only
+  --udp
+    	forward UDP only
+  --no-real-ip
+    	translate client addresses instead of preserving them
+  --name=<name>
+    	tunnel to change (default: the only tunnel)
+EOF
+}
+
+cmd_forward() {
+  local action=${1:-ls}; shift || true
+  local name="" port="" target_port="" protocol=both preserve=true
+  [[ $action == -h || $action == --help ]] && { help_forward; return; }
+  expand_flags "$@"; set -- "${EXPANDED[@]}"
+  while (( $# )); do
+    case "$1" in
+      --name) name=$2; shift 2 ;;
+      --to) target_port=$2; shift 2 ;;
+      --tcp) protocol=tcp; shift ;;
+      --udp) protocol=udp; shift ;;
+      --no-real-ip) preserve=false; shift ;;
+      -h | --help) help_forward; return ;;
+      *) port=$1; shift ;;
+    esac
+  done
+  name=$(pick_tunnel "$name")
+  local file; file=$(config_of "$name")
+  local peer; peer=$(peer_address "$file")
+
+  case "$action" in
+    ls | list)
+      awk '
+        BEGIN { }
+        function emit() { if (port != "") print port "|" target "|" protocol "|" (preserve == "true" && protocol != "udp" ? "preserved" : "translated") }
+        /^\[\[forward\]\]/ { emit(); port = ""; target = ""; protocol = "tcp,udp"; preserve = "false"; f = 1; next }
+        /^\[/ { emit(); port = ""; f = 0 }
+        f && /^listen_port/ { port = $3 }
+        f && /^target/ { target = $3; gsub(/"/, "", target) }
+        f && /^protocol/ { protocol = $3; gsub(/"/, "", protocol); if (protocol == "both") protocol = "tcp,udp" }
+        f && /^preserve_source/ { preserve = $3 }
+        END { emit() }' "$file" | column -t -s '|'
+      ;;
+    add)
+      require_root
+      [[ "$port" =~ ^[0-9]+$ ]] || fail "usage: norr forward add <port>"
+      awk '/^\[\[forward\]\]/ { f = 1 } f && /^listen_port/ { print $3 }' "$file" | grep -qx "$port" \
+        && fail "port $port is already forwarded"
+      printf '\n[[forward]]\nlisten_port = %s\ntarget = "%s:%s"\nprotocol = "%s"\npreserve_source = %s\n' \
+        "$port" "$peer" "${target_port:-$port}" "$protocol" "$preserve" >>"$file"
+      "$NORRD" check "$file" >/dev/null || fail "the forward is invalid"
+      systemctl restart "norr@$name" >/dev/null 2>&1 || fail "the service did not restart"
+      out "Forwarding port $port to $peer:${target_port:-$port}."
+      ;;
+    rm | remove)
+      require_root
+      [[ "$port" =~ ^[0-9]+$ ]] || fail "usage: norr forward rm <port>"
+      local updated; updated=$(mktemp)
+      awk -v port="$port" '
+        function emit() { if (block != "" && !drop) printf "%s", block; block = ""; drop = 0 }
+        /^\[\[forward\]\]/ { emit(); inside = 1; block = $0 "\n"; next }
+        /^\[/ { emit(); inside = 0 }
+        inside { block = block $0 "\n"; if ($0 == "listen_port = " port) drop = 1; next }
+        { print }
+        END { emit() }' "$file" >"$updated"
+      cmp -s "$file" "$updated" && { rm -f "$updated"; fail "port $port is not forwarded"; }
+      cat "$updated" >"$file"; rm -f "$updated"
+      systemctl restart "norr@$name" >/dev/null 2>&1 || fail "the service did not restart"
+      out "Stopped forwarding port $port."
+      ;;
+    *) fail "unknown action $action; see 'norr forward --help'" ;;
+  esac
+}
+
+cmd_code() {
+  local name; name=$(pick_tunnel "${1:-}")
+  [[ -r "$CONFIG_DIR/$name.code" ]] || fail "$name is a client; its join code is on the server"
+  cat "$CONFIG_DIR/$name.code"
+}
+
+cmd_service() {
+  local action=$1 name; name=$(pick_tunnel "${2:-}")
+  require_root
+  case "$action" in
+    up) systemctl enable --now "norr@$name" >/dev/null 2>&1 || fail "could not start $name"; out "$name is up." ;;
+    down) systemctl disable --now "norr@$name" >/dev/null 2>&1 || fail "could not stop $name"; out "$name is down." ;;
+  esac
+}
+
+cmd_logs() {
+  local name; name=$(pick_tunnel "${1:-}")
+  journalctl -u "norr@$name" -n 50 --no-pager 2>/dev/null || true
+  [[ -r "/var/log/norr-$name.log" ]] && tail -n 20 "/var/log/norr-$name.log"
+  return 0
+}
+
+cmd_remove() {
+  local name="" confirmed=false
+  while (( $# )); do
+    case "$1" in
+      -y | --yes) confirmed=true; shift ;;
+      *) name=$1; shift ;;
+    esac
+  done
+  name=$(pick_tunnel "$name")
+  require_root
+  if [[ $confirmed == false ]]; then
+    [[ -t 0 ]] || fail "pass --yes to remove $name"
+    read -r -p "Remove $name and its keys? [y/N] " answer
+    [[ "$answer" == y || "$answer" == Y ]] || { out "Kept $name."; return; }
+  fi
+  systemctl disable --now "norr@$name" >/dev/null 2>&1 || true
+  rm -f "$CONFIG_DIR/$name".{toml,key,pub,code}
+  out "Removed $name."
+}
+
+usage() {
+  cat <<EOF
+USAGE
+  norr [flags] <subcommand> [command flags]
+
+Norr connects two servers over an encrypted tunnel and forwards ports between them.
+
+For help on subcommands, add --help after: "norr status --help".
+
+SUBCOMMANDS
+  server   Create a tunnel and print a join code
+  client   Connect to a server with a join code
+  status   Show the state of every tunnel
+  forward  Manage forwarded ports
+  up       Start a tunnel
+  down     Stop a tunnel
+  code     Print the server's join code
+  logs     Show recent tunnel logs
+  remove   Delete a tunnel and its keys
+  version  Print the version
+
+FLAGS
+  --help
+    	show this help
+EOF
+}
+
+short_help() {
+  local usage=$1 text=$2
+  printf 'USAGE\n  %s\n\n%s\n' "$usage" "$text"
+}
+
+main() {
+  local command=${1:-help}
+  shift || true
+  if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then
+    case "$command" in
+      up) short_help "norr up [name]" "Start a tunnel and enable it at boot."; return ;;
+      down) short_help "norr down [name]" "Stop a tunnel and disable it at boot."; return ;;
+      code) short_help "norr code [name]" "Print the join code of a server tunnel."; return ;;
+      logs) short_help "norr logs [name]" "Show recent log output of a tunnel."; return ;;
+      remove) short_help "norr remove [--yes] [name]" "Stop a tunnel and delete its configuration and keys."; return ;;
+      version) short_help "norr version" "Print the version of norr and norrd."; return ;;
+    esac
+  fi
+  case "$command" in
+    server) cmd_server "$@" ;;
+    client) cmd_client "$@" ;;
+    status) cmd_status "$@" ;;
+    forward) cmd_forward "$@" ;;
+    up | down) cmd_service "$command" "${1:-}" ;;
+    code) cmd_code "${1:-}" ;;
+    logs) cmd_logs "${1:-}" ;;
+    remove) cmd_remove "$@" ;;
+    version | --version) out "norr $VERSION"; "$NORRD" version 2>/dev/null | sed 's/^/    /' || true ;;
+    help | -h | --help) usage ;;
+    *) printf 'norr: unknown command "%s"\n\n' "$command" >&2; usage >&2; exit 2 ;;
+  esac
+}
+
+main "$@"

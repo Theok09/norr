@@ -2,10 +2,12 @@
 // Licensed under the GNU AGPL v3 or later. See LICENSE.
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <expected>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "norr/control_plane.hpp"
 #include "norr/endpoint.hpp"
@@ -45,6 +47,9 @@ class MetricsServer {
  public:
   static constexpr std::size_t kMaximumRequestBytes = 8192;
 
+  static constexpr std::size_t kMaximumClients = 16;
+  static constexpr auto kClientDeadline = std::chrono::seconds{2};
+
   MetricsServer() = default;
   ~MetricsServer();
 
@@ -56,6 +61,7 @@ class MetricsServer {
   void stop() noexcept;
 
   [[nodiscard]] bool listening() const noexcept { return socket_.valid(); }
+  [[nodiscard]] int descriptor() const noexcept { return socket_.get(); }
 
   [[nodiscard]] std::expected<std::uint16_t, MetricsError> local_port() const;
 
@@ -64,8 +70,19 @@ class MetricsServer {
   [[nodiscard]] std::uint64_t requests_served() const noexcept { return served_; }
 
  private:
+  struct Client {
+    FileDescriptor socket;
+    std::string request;
+    std::string response;
+    std::size_t written{};
+    std::chrono::steady_clock::time_point deadline{};
+    bool answered{};
+  };
+
+  bool service(Client& client, const MetricsSnapshot& snapshot);
+
   FileDescriptor socket_;
+  std::vector<Client> clients_;
   std::uint64_t served_{};
 };
-
 }

@@ -100,18 +100,30 @@ class TcpTransport {
   [[nodiscard]] std::expected<std::size_t, TransportError> receive_frames(
       std::span<std::span<const std::byte>> out);
 
+  [[nodiscard]] std::expected<bool, TransportError> flush_output();
+  [[nodiscard]] bool has_pending_output() const noexcept { return !outbox_.empty(); }
+
   [[nodiscard]] TcpState state() const noexcept { return state_; }
   [[nodiscard]] bool connected() const noexcept { return state_ == TcpState::connected; }
+
+  void set_mark(std::uint32_t mark) noexcept;
   [[nodiscard]] int descriptor() const noexcept { return socket_.get(); }
   [[nodiscard]] const TcpStats& stats() const noexcept { return stats_; }
 
  private:
   friend class TcpListener;
 
+  void apply_mark() noexcept;
+  [[nodiscard]] std::expected<std::size_t, TransportError> write_some(
+      std::span<const std::byte> bytes);
+
   FileDescriptor socket_;
+  std::uint32_t mark_{};
   TcpState state_{TcpState::closed};
   FrameReassembler reassembler_;
   std::vector<std::byte> read_buffer_;
+  std::vector<std::byte> outbox_;
+  std::vector<std::byte> record_;
 
   std::vector<std::vector<std::byte>> ready_;
   std::optional<TlsSession> tls_;
@@ -154,9 +166,9 @@ class TcpListener {
 
   void close() noexcept { socket_.reset(); }
   [[nodiscard]] bool listening() const noexcept { return socket_.valid(); }
+  [[nodiscard]] int descriptor() const noexcept { return socket_.get(); }
 
  private:
   FileDescriptor socket_;
 };
-
 }

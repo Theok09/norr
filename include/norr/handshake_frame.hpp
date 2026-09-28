@@ -42,5 +42,4 @@ struct HandshakeFrameView {
 [[nodiscard]] constexpr std::size_t mac2_offset(std::size_t noise_length) noexcept {
   return mac1_offset(noise_length) + kHandshakeMacSize;
 }
-
 }

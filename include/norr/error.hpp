@@ -27,5 +27,4 @@ enum class Error {
   }
   return "unknown error";
 }
-
 }

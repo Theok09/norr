@@ -50,7 +50,6 @@ namespace {
 }
 
 constexpr std::size_t kHandshakePayloadSize = 16;
-
 }
 
 ControlPlane::ControlPlane(const KeyPair& local_static, SessionTable& sessions, TimerWheel& timers)
@@ -74,12 +73,17 @@ void ControlPlane::forget_peer(PeerId peer) {
   peers_.erase(peer);
   pending_.erase(peer);
   greatest_timestamp_.erase(peer);
+  learned_endpoint_.erase(peer);
   timers_->cancel(TimerKind::handshake_timeout, peer);
   timers_->cancel(TimerKind::handshake_retry, peer);
   timers_->cancel(TimerKind::rekey, peer);
   timers_->cancel(TimerKind::keepalive, peer);
 
-  std::erase_if(provisional_, [&](const auto& entry) { return entry.second.peer == peer; });
+  std::erase_if(provisional_, [&](const auto& entry) {
+    if (entry.second.peer != peer) return false;
+    timers_->cancel(TimerKind::provisional_timeout, entry.first);
+    return true;
+  });
   std::erase(keepalive_due_, peer);
 }
 
@@ -131,26 +135,50 @@ std::expected<OutgoingHandshake, ControlError> ControlPlane::build_initiation(Pe
   return OutgoingHandshake{.destination = entry.destination, .datagram = std::move(*frame)};
 }
 
+std::optional<Endpoint> ControlPlane::dial_endpoint(PeerId peer) const {
+  const auto* config = find_peer(peer);
+  if (config == nullptr) return std::nullopt;
+  if (config->endpoint.has_value()) return config->endpoint;
+  if (const auto learned = learned_endpoint_.find(peer); learned != learned_endpoint_.end()) {
+    return learned->second;
+  }
+  return std::nullopt;
+}
+
+std::expected<std::uint16_t, ControlError> ControlPlane::allocate_key_id() {
+  for (std::size_t attempt = 0; attempt < kMaximumPending * 2 + 2; ++attempt) {
+    const auto candidate = sessions_->allocate_key_id();
+    if (!candidate) return std::unexpected(ControlError::session_install_failed);
+    if (provisional_.contains(*candidate)) continue;
+    const auto held = std::ranges::any_of(
+        pending_, [&](const auto& entry) { return entry.second.local_key_id == *candidate; });
+    if (held) continue;
+    return *candidate;
+  }
+  return std::unexpected(ControlError::session_install_failed);
+}
+
 std::expected<OutgoingHandshake, ControlError> ControlPlane::start_handshake(PeerId peer,
                                                                              Instant now) {
   if (!crypto_available()) return std::unexpected(ControlError::crypto_unavailable);
 
   const auto* config = find_peer(peer);
   if (config == nullptr) return std::unexpected(ControlError::unknown_peer);
-  if (!config->endpoint.has_value()) return std::unexpected(ControlError::unknown_peer);
+  const auto destination = dial_endpoint(peer);
+  if (!destination.has_value()) return std::unexpected(ControlError::unknown_peer);
 
   if (pending_.size() >= kMaximumPending && !pending_.contains(peer)) {
     ++stats_.pending_rejected;
     return std::unexpected(ControlError::too_many_pending);
   }
 
-  const auto key_id = sessions_->allocate_key_id();
-  if (!key_id) return std::unexpected(ControlError::session_install_failed);
+  const auto key_id = allocate_key_id();
+  if (!key_id) return std::unexpected(key_id.error());
 
   Pending entry;
   entry.peer = peer;
   entry.local_key_id = *key_id;
-  entry.destination = *config->endpoint;
+  entry.destination = *destination;
   entry.attempt = 0;
 
   auto initiation = build_initiation(entry, now);
@@ -174,13 +202,15 @@ std::expected<void, ControlError> ControlPlane::install_session(PeerId peer,
   if (!installed) return std::unexpected(ControlError::session_install_failed);
 
   (*installed)->note_authenticated_endpoint(endpoint);
+  learned_endpoint_[peer] = endpoint;
 
+  const auto now = std::chrono::steady_clock::now();
   timers_->cancel(TimerKind::handshake_timeout, peer);
   timers_->cancel(TimerKind::handshake_retry, peer);
-  static_cast<void>(timers_->schedule(TimerKind::rekey, peer,
-                                      std::chrono::steady_clock::now() + kRekeyAfter));
-  static_cast<void>(timers_->schedule(TimerKind::keepalive, peer,
-                                      std::chrono::steady_clock::now() + kKeepaliveInterval));
+  timers_->cancel(TimerKind::rekey, peer);
+  timers_->cancel(TimerKind::keepalive, peer);
+  static_cast<void>(timers_->schedule(TimerKind::rekey, peer, now + kRekeyAfter));
+  static_cast<void>(timers_->schedule(TimerKind::keepalive, peer, now + kKeepaliveInterval));
   return {};
 }
 
@@ -221,12 +251,16 @@ std::expected<std::optional<OutgoingHandshake>, ControlError> ControlPlane::hand
   }
 
   if (frame->message == HandshakeMessage::init) {
-    if (pending_.size() >= kMaximumPending) {
+    if (provisional_.size() >= kMaximumPending) {
       ++stats_.pending_rejected;
       return std::unexpected(ControlError::too_many_pending);
     }
 
-    if (frame->has_macs) {
+    if (!frame->has_macs) {
+      ++stats_.mac1_failures;
+      return std::unexpected(ControlError::invalid_message);
+    }
+    {
       Mac received_mac1{};
       std::copy(frame->mac1.begin(), frame->mac1.end(), received_mac1.begin());
 
@@ -257,9 +291,6 @@ std::expected<std::optional<OutgoingHandshake>, ControlError> ControlPlane::hand
               OutgoingHandshake{.destination = source, .datagram = std::move(*cookie_datagram)}};
         }
       }
-    } else if (issuer_.under_load()) {
-      ++stats_.mac1_failures;
-      return std::unexpected(ControlError::invalid_message);
     }
 
     const PeerConfig* matched = nullptr;
@@ -316,8 +347,8 @@ std::expected<std::optional<OutgoingHandshake>, ControlError> ControlPlane::hand
       }
       greatest_timestamp_[matched_id] = timestamp;
 
-      const auto key_id = sessions_->allocate_key_id();
-      if (!key_id) return std::unexpected(ControlError::session_install_failed);
+      const auto key_id = allocate_key_id();
+      if (!key_id) return std::unexpected(key_id.error());
 
       const auto reply_payload = build_payload(ProtocolVersion{}, 0, *key_id, handshake_timestamp());
       std::vector<std::byte> message(kNoiseMessage2Overhead + reply_payload.size());
@@ -349,7 +380,7 @@ std::expected<std::optional<OutgoingHandshake>, ControlError> ControlPlane::hand
                                           .endpoint = source,
                                           .created = now};
 
-      static_cast<void>(timers_->schedule(TimerKind::handshake_timeout,
+      static_cast<void>(timers_->schedule(TimerKind::provisional_timeout,
                                           static_cast<std::uint32_t>(*key_id),
                                           now + kHandshakeTimeout));
 
@@ -370,8 +401,18 @@ std::expected<std::optional<OutgoingHandshake>, ControlError> ControlPlane::hand
   }
 
   if (frame->message == HandshakeMessage::response) {
+    if (!frame->has_macs) {
+      ++stats_.mac1_failures;
+      return std::unexpected(ControlError::invalid_message);
+    }
+    Mac received_mac1{};
+    std::copy(frame->mac1.begin(), frame->mac1.end(), received_mac1.begin());
+
     for (auto& [peer_id, entry] : pending_) {
-      if (!entry.handshake.has_value()) continue;
+      if (!entry.handshake.has_value() || !entry.cookies.has_value()) continue;
+      if (!constant_time_equal(entry.cookies->compute_mac1(frame->mac1_covered), received_mac1)) {
+        continue;
+      }
 
       std::vector<std::byte> payload(kHandshakePayloadSize);
       const auto read = entry.handshake->read_message_2(frame->noise_message, payload);
@@ -440,10 +481,11 @@ std::expected<std::size_t, ControlError> ControlPlane::try_promote_provisional(
   (*installed)->note_authenticated_endpoint(source);
 
   const auto peer = (*installed)->peer();
-  timers_->cancel(TimerKind::handshake_timeout, peer);
-  timers_->cancel(TimerKind::handshake_retry, peer);
-  static_cast<void>(timers_->schedule(TimerKind::rekey, peer,
-                                      std::chrono::steady_clock::now() + kRekeyAfter));
+  learned_endpoint_[peer] = source;
+  timers_->cancel(TimerKind::provisional_timeout, view.header.key_id);
+
+  timers_->cancel(TimerKind::rekey, peer);
+  timers_->cancel(TimerKind::keepalive, peer);
   static_cast<void>(timers_->schedule(TimerKind::keepalive, peer,
                                       std::chrono::steady_clock::now() + kKeepaliveInterval));
 
@@ -463,7 +505,10 @@ std::vector<OutgoingHandshake> ControlPlane::on_timers(std::span<const TimerEven
           ++stats_.handshakes_timed_out;
           timers_->cancel(TimerKind::handshake_retry, event.subject);
         }
+        break;
+      }
 
+      case TimerKind::provisional_timeout: {
         if (event.subject <= 0xFFFFU &&
             provisional_.erase(static_cast<std::uint16_t>(event.subject)) > 0) {
           ++stats_.handshakes_timed_out;
@@ -490,6 +535,7 @@ std::vector<OutgoingHandshake> ControlPlane::on_timers(std::span<const TimerEven
 
       case TimerKind::keepalive:
 
+        if (sessions_->find_by_peer(event.subject) == nullptr) break;
         keepalive_due_.push_back(event.subject);
         static_cast<void>(
             timers_->schedule(TimerKind::keepalive, event.subject, now + kKeepaliveInterval));
@@ -505,5 +551,4 @@ std::vector<OutgoingHandshake> ControlPlane::on_timers(std::span<const TimerEven
 
   return outgoing;
 }
-
 }

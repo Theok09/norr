@@ -20,8 +20,6 @@ void TcpCarrier::poll(Instant now) {
   }
 
   if (transport_->state() == TcpState::failed) {
-    // A failed connection is closed so the next poll redials. The peer keeps
-    // its session: a carrier dropping is not a reason to rekey.
     transport_->close();
     tls_started_ = false;
     return;
@@ -40,7 +38,10 @@ void TcpCarrier::poll(Instant now) {
 
   if (!transport_->tls_established()) {
     static_cast<void>(transport_->poll_tls());
+    return;
   }
+
+  if (transport_->has_pending_output()) static_cast<void>(transport_->flush_output());
 }
 
 std::expected<std::size_t, TransportError> TcpCarrier::send_batch(
@@ -51,7 +52,6 @@ std::expected<std::size_t, TransportError> TcpCarrier::send_batch(
   for (const auto& datagram : datagrams) {
     const auto result = transport_->send_frame(datagram.payload);
     if (!result) {
-      // would_block is back pressure, not a failure: the caller retries.
       if (result.error() == TransportError::would_block) break;
       ++stats_.tx_errors;
       return std::unexpected(result.error());
@@ -77,8 +77,6 @@ std::expected<std::size_t, TransportError> TcpCarrier::receive_batch(
   }
 
   for (std::size_t index = 0; index < *received; ++index) {
-    // Every frame on this connection came from the one peer at the far end,
-    // so the source is known rather than read from each datagram.
     out[index] = InboundDatagram{.source = peer_, .payload = inbox_[index]};
     ++stats_.rx_packets;
     stats_.rx_bytes += inbox_[index].size();
@@ -99,13 +97,26 @@ void QuicCarrier::flush() {
 }
 
 void QuicCarrier::poll() {
-  if (connection_->established()) return;
+  const auto now = std::chrono::steady_clock::now();
+  auto* ngtcp2 = dynamic_cast<Ngtcp2Connection*>(connection_);
 
-  // The dialing side starts the handshake once; the listening side has nothing
-  // to do until an Initial arrives, which receive_batch handles.
-  if (!listening_ && !dialed_) {
+  if (ngtcp2 != nullptr) {
+    const bool stalled =
+        ngtcp2->active() && !ngtcp2->established() && now - started_ > kSetupTimeout;
+    if (ngtcp2->broken() || stalled) {
+      ngtcp2->close();
+      ++stats_.tx_errors;
+      dialed_ = false;
+      accepted_ = false;
+      next_dial_ = now + kRedialDelay;
+    }
+    ngtcp2->service_timers();
+  }
+
+  if (!listening_ && !dialed_ && now >= next_dial_) {
     dialed_ = true;
-    if (!connection_->connect(peer_)) return;
+    started_ = now;
+    if (!connection_->connect(peer_)) next_dial_ = now + kRedialDelay;
   }
 
   flush();
@@ -154,20 +165,21 @@ std::expected<std::size_t, TransportError> QuicCarrier::receive_batch(
   if (ngtcp2 == nullptr) return received;
 
   for (std::size_t index = 0; index < *received; ++index) {
-    // The listening side has no connection until the first Initial arrives.
-    // Accepting it here is what makes a QUIC server possible without a
-    // separate listener socket: ngtcp2 needs the datagram, not a socket.
     if (listening_ && !accepted_) {
       const std::vector<std::byte> initial(out[index].payload.begin(),
                                            out[index].payload.end());
       if (ngtcp2->accept(local_, out[index].source, initial)) {
         accepted_ = true;
+        started_ = std::chrono::steady_clock::now();
         peer_ = out[index].source;
         ++stats_.rx_packets;
         continue;
       }
-      // Not a valid Initial. Dropped rather than fed to a connection that does
-      // not exist yet.
+
+      ++stats_.rx_errors;
+      continue;
+    }
+    if (!(out[index].source == peer_)) {
       ++stats_.rx_errors;
       continue;
     }
@@ -187,5 +199,4 @@ std::expected<std::size_t, TransportError> QuicCarrier::receive_batch(
   }
   return *count;
 }
-
 }

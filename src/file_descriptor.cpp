@@ -15,5 +15,4 @@ void FileDescriptor::reset(int descriptor) noexcept {
   }
   descriptor_ = descriptor;
 }
-
 }

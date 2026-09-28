@@ -25,7 +25,6 @@ void mix_address(std::uint64_t& hash, const Address& address) noexcept {
   mix_address(hash, address);
   return hash;
 }
-
 }
 
 FlowKey flow_key_of(const IpPacketView& packet, std::span<const std::byte> frame) noexcept {
@@ -60,5 +59,4 @@ std::uint64_t hash_flow(const FlowKey& key) noexcept {
   hash ^= hash >> 33U;
   return hash;
 }
-
 }

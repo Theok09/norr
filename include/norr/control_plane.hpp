@@ -87,12 +87,6 @@ class ControlPlane {
 
   [[nodiscard]] const PeerConfig* find_peer(PeerId peer) const noexcept;
 
-  // Forgets a peer's configuration and any half-open handshake for it.
-  //
-  // Established sessions are left alone: a reload that removed a peer from the
-  // configuration should stop new handshakes, and the datapath drops its
-  // traffic once the routes are gone, but tearing a live session down inside
-  // the reload would drop packets that are already in flight.
   void forget_peer(PeerId peer);
 
   [[nodiscard]] std::size_t peer_count() const noexcept { return peers_.size(); }
@@ -107,6 +101,10 @@ class ControlPlane {
                                                          Instant now);
 
   [[nodiscard]] std::size_t pending() const noexcept { return pending_.size(); }
+
+  [[nodiscard]] bool has_pending(PeerId peer) const noexcept { return pending_.contains(peer); }
+
+  [[nodiscard]] std::optional<Endpoint> dial_endpoint(PeerId peer) const;
 
   [[nodiscard]] std::size_t provisional() const noexcept { return provisional_.size(); }
 
@@ -159,6 +157,8 @@ class ControlPlane {
   [[nodiscard]] std::expected<OutgoingHandshake, ControlError> build_initiation(Pending& entry,
                                                                                 Instant now);
 
+  [[nodiscard]] std::expected<std::uint16_t, ControlError> allocate_key_id();
+
   [[nodiscard]] std::expected<void, ControlError> install_session(PeerId peer,
                                                                   std::uint16_t local_key_id,
                                                                   std::uint16_t remote_key_id,
@@ -174,6 +174,7 @@ class ControlPlane {
   std::unordered_map<std::uint16_t, Provisional> provisional_;
   std::vector<PeerId> keepalive_due_;
   std::unordered_map<PeerId, std::uint64_t> greatest_timestamp_;
+  std::unordered_map<PeerId, Endpoint> learned_endpoint_;
   SourceRateLimiter rate_limiter_;
   GlobalLimiter global_limiter_;
   CookieIssuer issuer_;
@@ -182,5 +183,4 @@ class ControlPlane {
   std::uint64_t handshakes_seen_{};
   ControlStats stats_{};
 };
-
 }

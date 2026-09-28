@@ -3,7 +3,6 @@
 /fuzz-build/
 /compile_commands.json
 
-# Core dumps carry process memory, which for a tunnel means session keys.
 core
 core.*
 *.core
@@ -15,8 +14,8 @@ core.*
 
 /dist/
 
-# The test suite is kept local, not published.
 tests/
 scripts/e2e_*.sh
 bench/
 fuzz/
+/.release/

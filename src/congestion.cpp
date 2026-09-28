@@ -10,7 +10,6 @@ namespace {
 [[nodiscard]] double to_seconds(Duration duration) noexcept {
   return std::chrono::duration<double>(duration).count();
 }
-
 }
 
 Duration CongestionController::queueing_delay() const noexcept {
@@ -83,5 +82,4 @@ void CongestionController::observe(const DeliverySample& sample, Instant now) {
 
   rate_ = std::clamp(rate_, config_.minimum_rate_bytes, config_.maximum_rate_bytes);
 }
-
 }
