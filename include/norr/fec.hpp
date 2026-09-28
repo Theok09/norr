@@ -169,7 +169,7 @@ struct FecLossReport {
 
 class AdaptiveFec {
  public:
-  static constexpr double kEnableLoss = 0.003;
+  static constexpr double kEnableLoss = 0.008;
   static constexpr double kDisableLoss = 0.001;
   static constexpr std::uint32_t kReportsBeforeEnable = 3;
   static constexpr std::uint32_t kCalmBeforeDisable = 5;
