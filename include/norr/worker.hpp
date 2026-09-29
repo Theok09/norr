@@ -243,6 +243,7 @@ class Worker {
     Endpoint destination{};
     std::size_t sealed{};
     std::size_t fec{kNoFec};
+    std::uint32_t flow{};
     bool ok{};
   };
   static constexpr std::size_t kNoFec = static_cast<std::size_t>(-1);

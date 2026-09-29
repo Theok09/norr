@@ -218,13 +218,14 @@ std::expected<std::size_t, TransportError> TcpCarrier::send_batch(
 
   std::size_t sent = 0;
   for (const auto& datagram : datagrams) {
+    const auto base = datagram.flow != 0 ? datagram.flow % count : rr_ % count;
     bool delivered = false;
     for (std::size_t attempt = 0; attempt < count; ++attempt) {
-      auto* conn = ready_conns[(rr_ + attempt) % count];
+      auto* conn = ready_conns[(base + attempt) % count];
       const auto result = conn->send_frame(datagram.payload);
       if (result) {
         delivered = true;
-        ++rr_;
+        if (datagram.flow == 0) ++rr_;
         break;
       }
       if (result.error() != TransportError::would_block) {

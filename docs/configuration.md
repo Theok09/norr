@@ -69,7 +69,7 @@ preserve_source = true
 | Key | Description | Default |
 | --- | --- | --- |
 | `mode` | `udp`, `tcp-tls`, `quic`, or `auto` to fall back automatically. | `auto` |
-| `connections` | Parallel TCP connections for the `tcp-tls` carrier, 1 to 8. More connections avoid head-of-line blocking on a clean TCP path. | `1` |
+| `connections` | Parallel TCP connections for the `tcp-tls` carrier, 1 to 8. Each inner flow is pinned to one connection by its address/port hash, so flows spread across the connections while packet order within a flow is preserved. | `1` |
 | `spoof_source_ips` | Comma-separated source addresses the `udp` carrier forges on outbound datagrams, rotated per packet. The peer replies to the real endpoint learned in the handshake, so a stateful middlebox sees only unidirectional flows. Requires `CAP_NET_ADMIN`. | |
 
 ## `[fec]`
