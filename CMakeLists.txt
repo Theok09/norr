@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(norr VERSION 0.2.0 LANGUAGES CXX)
+project(norr VERSION 0.2.1 LANGUAGES CXX)
 
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/check.hpp)
     set(NORR_TESTS_DEFAULT ON)
