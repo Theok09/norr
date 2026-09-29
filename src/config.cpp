@@ -297,6 +297,11 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       if (!burst) return fail(burst.error());
       if (*burst == 0) return fail(ConfigError::value_out_of_range);
       config.qos_burst_bytes = *burst;
+    } else if (qualified == "transport.connections") {
+      const auto count = parse_uint(value);
+      if (!count) return fail(count.error());
+      if (*count < 1 || *count > 8) return fail(ConfigError::value_out_of_range);
+      config.tcp_connections = static_cast<std::uint8_t>(*count);
     } else if (qualified == "transport.profile") {
       if (value == "standard") config.profile = TrafficProfile::standard;
       else if (value == "quic") config.profile = TrafficProfile::quic;

@@ -2,6 +2,7 @@
 // Licensed under the GNU AGPL v3 or later. See LICENSE.
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <chrono>
 #include <expected>
@@ -88,7 +89,21 @@ class TcpCarrier final : public Carrier {
     return transport_->connected() && transport_->tls_established();
   }
 
+  void set_connections(std::size_t count) {
+    target_ = std::clamp<std::size_t>(count, 1, 8);
+    if (target_ > 1) extra_.reserve(target_ - 1);
+  }
+  [[nodiscard]] std::size_t target_connections() const noexcept { return target_; }
+  [[nodiscard]] bool wants_more() const noexcept { return extra_.size() + 1 < target_; }
+  void adopt(TcpTransport&& connection) {
+    if (extra_.size() + 1 >= target_) return;
+    extra_.push_back(std::move(connection));
+    extra_started_.push_back(false);
+  }
+
  private:
+  void drive(TcpTransport& transport, bool& tls_started, bool dialing);
+
   TcpTransport* transport_;
   Endpoint peer_{};
   bool dialing_{};
@@ -96,6 +111,10 @@ class TcpCarrier final : public Carrier {
   PresharedKey preshared_{};
   std::vector<std::span<const std::byte>> inbox_;
   TransportStats stats_{};
+  std::size_t target_{1};
+  std::vector<TcpTransport> extra_;
+  std::vector<bool> extra_started_;
+  std::size_t rr_{0};
 };
 
 class QuicCarrier final : public Carrier {

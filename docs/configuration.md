@@ -69,6 +69,7 @@ preserve_source = true
 | Key | Description | Default |
 | --- | --- | --- |
 | `mode` | `udp`, `tcp-tls`, `quic`, or `auto` to fall back automatically. | `auto` |
+| `connections` | Parallel TCP connections for the `tcp-tls` carrier, 1 to 8. More connections avoid head-of-line blocking on a clean TCP path. | `1` |
 
 ## `[fec]`
 

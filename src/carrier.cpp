@@ -5,57 +5,89 @@
 #include <array>
 
 namespace norr {
-void TcpCarrier::poll(Instant now) {
-  static_cast<void>(now);
-
-  if (dialing_ && transport_->state() == TcpState::closed) {
-    tls_started_ = false;
-    static_cast<void>(transport_->connect(peer_));
+void TcpCarrier::drive(TcpTransport& transport, bool& tls_started, bool dialing) {
+  if (dialing && transport.state() == TcpState::closed) {
+    tls_started = false;
+    static_cast<void>(transport.connect(peer_));
     return;
   }
 
-  if (transport_->state() == TcpState::connecting) {
-    const auto connected = transport_->poll_connect();
+  if (transport.state() == TcpState::connecting) {
+    const auto connected = transport.poll_connect();
     if (!connected || !*connected) return;
   }
 
-  if (transport_->state() == TcpState::failed) {
-    transport_->close();
-    tls_started_ = false;
+  if (transport.state() == TcpState::failed) {
+    transport.close();
+    tls_started = false;
     return;
   }
 
-  if (!transport_->connected()) return;
+  if (!transport.connected()) return;
 
-  if (!tls_started_) {
-    const auto role = dialing_ ? TlsRole::client : TlsRole::server;
-    if (transport_->enable_tls(role, "norr", preshared_)) {
-      tls_started_ = true;
+  if (!tls_started) {
+    const auto role = dialing ? TlsRole::client : TlsRole::server;
+    if (transport.enable_tls(role, "norr", preshared_)) {
+      tls_started = true;
     } else {
       return;
     }
   }
 
-  if (!transport_->tls_established()) {
-    static_cast<void>(transport_->poll_tls());
+  if (!transport.tls_established()) {
+    static_cast<void>(transport.poll_tls());
     return;
   }
 
-  if (transport_->has_pending_output()) static_cast<void>(transport_->flush_output());
+  if (transport.has_pending_output()) static_cast<void>(transport.flush_output());
+}
+
+void TcpCarrier::poll(Instant now) {
+  static_cast<void>(now);
+  drive(*transport_, tls_started_, dialing_);
+
+  if (dialing_) {
+    while (extra_.size() + 1 < target_) {
+      extra_.emplace_back();
+      extra_started_.push_back(false);
+    }
+  }
+  for (std::size_t index = 0; index < extra_.size(); ++index) {
+    bool started = extra_started_[index];
+    drive(extra_[index], started, dialing_);
+    extra_started_[index] = started;
+  }
 }
 
 std::expected<std::size_t, TransportError> TcpCarrier::send_batch(
     std::span<const OutboundDatagram> datagrams) {
-  if (!ready()) return std::unexpected(TransportError::not_started);
+  std::array<TcpTransport*, 8> ready_conns{};
+  std::size_t count = 0;
+  if (transport_->connected() && transport_->tls_established()) ready_conns[count++] = transport_;
+  for (auto& conn : extra_) {
+    if (count >= ready_conns.size()) break;
+    if (conn.connected() && conn.tls_established()) ready_conns[count++] = &conn;
+  }
+  if (count == 0) return std::unexpected(TransportError::not_started);
 
   std::size_t sent = 0;
   for (const auto& datagram : datagrams) {
-    const auto result = transport_->send_frame(datagram.payload);
-    if (!result) {
-      if (result.error() == TransportError::would_block) break;
-      ++stats_.tx_errors;
-      return std::unexpected(result.error());
+    bool delivered = false;
+    for (std::size_t attempt = 0; attempt < count; ++attempt) {
+      auto* conn = ready_conns[(rr_ + attempt) % count];
+      const auto result = conn->send_frame(datagram.payload);
+      if (result) {
+        delivered = true;
+        ++rr_;
+        break;
+      }
+      if (result.error() != TransportError::would_block) {
+        ++stats_.tx_errors;
+        return sent > 0 ? std::expected<std::size_t, TransportError>{sent}
+                        : std::unexpected(result.error());
+      }
     }
+    if (!delivered) break;
     ++sent;
     ++stats_.tx_packets;
     stats_.tx_bytes += datagram.payload.size();
@@ -67,21 +99,27 @@ std::expected<std::size_t, TransportError> TcpCarrier::receive_batch(
     ReceiveBuffers& buffers, std::span<InboundDatagram> out) {
   static_cast<void>(buffers);
   if (out.empty()) return std::size_t{0};
-  if (!ready()) return std::size_t{0};
 
-  inbox_.resize(out.size());
-  const auto received = transport_->receive_frames(inbox_);
-  if (!received) {
-    ++stats_.rx_errors;
-    return std::unexpected(received.error());
-  }
+  std::size_t delivered = 0;
+  const auto drain = [&](TcpTransport& conn) {
+    if (delivered >= out.size()) return;
+    if (!conn.connected() || !conn.tls_established()) return;
+    inbox_.resize(out.size() - delivered);
+    const auto received = conn.receive_frames(inbox_);
+    if (!received) {
+      ++stats_.rx_errors;
+      return;
+    }
+    for (std::size_t index = 0; index < *received && delivered < out.size(); ++index) {
+      out[delivered++] = InboundDatagram{.source = peer_, .payload = inbox_[index]};
+      ++stats_.rx_packets;
+      stats_.rx_bytes += inbox_[index].size();
+    }
+  };
 
-  for (std::size_t index = 0; index < *received; ++index) {
-    out[index] = InboundDatagram{.source = peer_, .payload = inbox_[index]};
-    ++stats_.rx_packets;
-    stats_.rx_bytes += inbox_[index].size();
-  }
-  return *received;
+  drain(*transport_);
+  for (auto& conn : extra_) drain(conn);
+  return delivered;
 }
 
 void QuicCarrier::flush() {

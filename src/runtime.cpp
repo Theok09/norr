@@ -266,6 +266,7 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
     }
 
     tcp_carrier_ = std::make_unique<TcpCarrier>(tcp_, far, dialing, partner->preshared);
+    tcp_carrier_->set_connections(config.tcp_connections);
     carrier_ = tcp_carrier_.get();
     active_kind_ = TransportKind::tcp_tls;
   } else {
@@ -291,6 +292,7 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
         }
       }
       tcp_carrier_ = std::make_unique<TcpCarrier>(tcp_, far, dials, partner->preshared);
+      tcp_carrier_->set_connections(config.tcp_connections);
       paths_.add_path(TransportKind::tcp_tls);
     }
     if (partner != nullptr && quic_available()) {
@@ -587,6 +589,8 @@ void Runtime::service_tcp_carrier(Instant now) {
 
   const auto was_ready = tcp_ready_;
 
+  auto* tcp_carrier = dynamic_cast<TcpCarrier*>(carrier_);
+
   if (tcp_listener_.listening() && !tcp_.connected() &&
       tcp_.state() != TcpState::connecting) {
     auto incoming = tcp_listener_.accept();
@@ -594,9 +598,15 @@ void Runtime::service_tcp_carrier(Instant now) {
       tcp_ = std::move(**incoming);
       tcp_.set_mark(fwmark_);
     }
+  } else if (tcp_listener_.listening() && tcp_carrier != nullptr && tcp_carrier->wants_more()) {
+    auto incoming = tcp_listener_.accept();
+    if (incoming && incoming->has_value()) {
+      auto conn = std::move(**incoming);
+      conn.set_mark(fwmark_);
+      tcp_carrier->adopt(std::move(conn));
+    }
   }
 
-  auto* tcp_carrier = dynamic_cast<TcpCarrier*>(carrier_);
   if (tcp_carrier == nullptr) return;
 
   tcp_carrier->poll(now);

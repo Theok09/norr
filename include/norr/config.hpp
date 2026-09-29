@@ -92,6 +92,7 @@ struct Config {
   std::string identity_key_file;
   NetworkConfig network;
   TransportMode transport{TransportMode::automatic};
+  std::uint8_t tcp_connections{1};
 
   bool qos_enabled{false};
   std::uint64_t qos_rate_bytes{};
