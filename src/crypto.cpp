@@ -169,6 +169,12 @@ bool constant_time_equal(std::span<const std::byte> left,
   return difference == 0;
 }
 
+std::expected<void, CryptoError> keystream_xor(std::span<const std::byte>,
+                                               std::span<const std::byte>,
+                                               std::span<std::byte>) noexcept {
+  return std::unexpected(CryptoError::unsupported_platform);
+}
+
 std::expected<std::size_t, CryptoError> TrafficKeys::seal(std::uint64_t, std::span<const std::byte>,
                                                           std::span<const std::byte>,
                                                           std::span<std::byte>) const noexcept {
@@ -235,6 +241,23 @@ bool constant_time_equal(std::span<const std::byte> left,
   if (left.size() != right.size()) return false;
   if (left.empty()) return true;
   return sodium_memcmp(left.data(), right.data(), left.size()) == 0;
+}
+
+std::expected<void, CryptoError> keystream_xor(std::span<const std::byte> key,
+                                               std::span<const std::byte> nonce,
+                                               std::span<std::byte> data) noexcept {
+  if (key.size() != crypto_stream_chacha20_KEYBYTES) {
+    return std::unexpected(CryptoError::invalid_key_length);
+  }
+  if (nonce.size() != crypto_stream_chacha20_NONCEBYTES) {
+    return std::unexpected(CryptoError::invalid_nonce);
+  }
+  if (data.empty()) return {};
+  auto* bytes = reinterpret_cast<unsigned char*>(data.data());
+  crypto_stream_chacha20_xor(bytes, bytes, data.size(),
+                             reinterpret_cast<const unsigned char*>(nonce.data()),
+                             reinterpret_cast<const unsigned char*>(key.data()));
+  return {};
 }
 
 std::expected<std::size_t, CryptoError> TrafficKeys::seal(

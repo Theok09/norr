@@ -34,6 +34,7 @@ add_library(norr_core
     src/address.cpp
     src/blake2s.cpp
     src/capability.cpp
+    src/camouflage.cpp
     src/carrier.cpp
     src/config.cpp
     src/congestion.cpp
@@ -48,12 +49,14 @@ add_library(norr_core
     src/handshake.cpp
     src/handshake_frame.cpp
     src/io_backend.cpp
+    src/icmp_transport.cpp
     src/ip_packet.cpp
     src/key_schedule.cpp
     src/load_monitor.cpp
     src/metrics.cpp
     src/notify.cpp
     src/noise.cpp
+    src/obfuscation.cpp
     src/offload.cpp
     src/parallel.cpp
     src/nonce.cpp
@@ -227,6 +230,15 @@ if(NORR_BUILD_TESTS)
     add_executable(norr_config_tests tests/config_test.cpp)
     target_link_libraries(norr_config_tests PRIVATE norr_core tests_support)
     add_test(NAME norr_config_tests COMMAND norr_config_tests)
+    add_executable(norr_obfuscation_tests tests/obfuscation_test.cpp)
+    target_link_libraries(norr_obfuscation_tests PRIVATE norr_core tests_support)
+    add_test(NAME norr_obfuscation_tests COMMAND norr_obfuscation_tests)
+    add_executable(norr_icmp_tests tests/icmp_test.cpp)
+    target_link_libraries(norr_icmp_tests PRIVATE norr_core tests_support)
+    add_test(NAME norr_icmp_tests COMMAND norr_icmp_tests)
+    add_executable(norr_camouflage_tests tests/camouflage_test.cpp)
+    target_link_libraries(norr_camouflage_tests PRIVATE norr_core tests_support)
+    add_test(NAME norr_camouflage_tests COMMAND norr_camouflage_tests)
     add_executable(norr_key_schedule_tests tests/key_schedule_test.cpp)
     target_link_libraries(norr_key_schedule_tests PRIVATE norr_core tests_support)
     add_test(NAME norr_key_schedule_tests COMMAND norr_key_schedule_tests)

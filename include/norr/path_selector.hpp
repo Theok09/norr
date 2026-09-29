@@ -9,13 +9,14 @@
 #include "norr/rate_limit.hpp"
 
 namespace norr {
-enum class TransportKind : std::uint8_t { udp, quic, tcp_tls };
+enum class TransportKind : std::uint8_t { udp, quic, tcp_tls, icmp };
 
 [[nodiscard]] constexpr std::string_view transport_kind_name(TransportKind kind) noexcept {
   switch (kind) {
     case TransportKind::udp: return "udp";
     case TransportKind::quic: return "quic";
     case TransportKind::tcp_tls: return "tcp-tls";
+    case TransportKind::icmp: return "icmp";
   }
   return "unknown";
 }

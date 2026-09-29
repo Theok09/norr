@@ -249,7 +249,8 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
                      "transport.mode = tcp-tls carries one peer per connection; "
                      "configure a single peer or use udp"});
     }
-    if (!tls_available()) {
+    const bool camouflaged = config.camouflage == CamouflageMode::fake_tls;
+    if (!camouflaged && !tls_available()) {
       return std::unexpected(Diagnostic{RuntimeError::option_not_implemented,
                                         "transport.mode = tcp-tls needs a TLS backend"});
     }
@@ -267,10 +268,68 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
 
     tcp_carrier_ = std::make_unique<TcpCarrier>(tcp_, far, dialing, partner->preshared);
     tcp_carrier_->set_connections(config.tcp_connections);
+    if (camouflaged) tcp_carrier_->set_camouflage(config.camouflage_sni);
     carrier_ = tcp_carrier_.get();
     active_kind_ = TransportKind::tcp_tls;
+  } else if (config.transport == TransportMode::icmp) {
+    const PeerConfig* partner = nullptr;
+    for (PeerId peer = 1; peer <= peer_count_; ++peer) {
+      const auto* candidate = control_->find_peer(peer);
+      if (candidate == nullptr) continue;
+      partner = candidate;
+      if (candidate->endpoint.has_value()) break;
+    }
+    if (partner == nullptr) {
+      return std::unexpected(Diagnostic{RuntimeError::control_failed,
+                                        "transport.mode = icmp needs a configured peer"});
+    }
+    if (peer_count_ > 1) {
+      return std::unexpected(
+          Diagnostic{RuntimeError::option_not_implemented,
+                     "transport.mode = icmp carries one peer per socket; configure a single peer"});
+    }
+    if (!IcmpTransport::supported()) {
+      return std::unexpected(Diagnostic{RuntimeError::option_not_implemented,
+                                        "transport.mode = icmp needs the Linux raw-socket backend"});
+    }
+    const auto role = config.role == NodeRole::client ? IcmpTransport::Role::client
+                                                      : IcmpTransport::Role::server;
+    if (role == IcmpTransport::Role::server) {
+      if (std::ofstream sysctl{"/proc/sys/net/ipv4/icmp_echo_ignore_all"}; sysctl) {
+        sysctl << "1\n";
+      } else {
+        std::fprintf(stderr,
+                     "icmp: could not set icmp_echo_ignore_all; kernel echo replies may "
+                     "collide with the tunnel\n");
+      }
+    }
+    if (const auto ok = icmp_transport_.start(*bind_address, role); !ok) {
+      return std::unexpected(Diagnostic{RuntimeError::bind_failed,
+                                        std::string{transport_error_message(ok.error())}});
+    }
+    if (fwmark_ != 0) static_cast<void>(icmp_transport_.set_mark(fwmark_));
+    const auto far = partner->endpoint.has_value() ? *partner->endpoint : *bind_address;
+    icmp_carrier_ = std::make_unique<IcmpCarrier>(icmp_transport_, far);
+    if (config.obfuscation.mode != ObfuscationMode::off) {
+      icmp_carrier_->configure_obfuscation(config.obfuscation, partner->preshared);
+      if (config.role == NodeRole::client) icmp_carrier_->prime();
+    }
+    carrier_ = icmp_carrier_.get();
+    active_kind_ = TransportKind::icmp;
   } else {
     udp_carrier_ = std::make_unique<UdpCarrier>(transport_);
+    if (config.obfuscation.mode != ObfuscationMode::off) {
+      if (peer_count_ != 1) {
+        return std::unexpected(
+            Diagnostic{RuntimeError::option_not_implemented,
+                       "transport.obfuscation carries one peer per socket; configure a "
+                       "single peer"});
+      }
+      const auto* partner = control_->find_peer(1);
+      const auto preshared = partner != nullptr ? partner->preshared : PresharedKey{};
+      udp_carrier_->configure_obfuscation(config.obfuscation, preshared);
+      if (config.role == NodeRole::client) udp_carrier_->prime();
+    }
     carrier_ = udp_carrier_.get();
     active_kind_ = TransportKind::udp;
   }
@@ -283,7 +342,8 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
                          ? *partner->endpoint
                          : Endpoint{};
 
-    if (partner != nullptr && tls_available()) {
+    const bool camouflaged = config.camouflage == CamouflageMode::fake_tls;
+    if (partner != nullptr && (camouflaged || tls_available())) {
       if (!dials) {
         if (const auto listening = tcp_listener_.listen(*bind_address); !listening) {
           return std::unexpected(
@@ -293,6 +353,7 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
       }
       tcp_carrier_ = std::make_unique<TcpCarrier>(tcp_, far, dials, partner->preshared);
       tcp_carrier_->set_connections(config.tcp_connections);
+      if (camouflaged) tcp_carrier_->set_camouflage(config.camouflage_sni);
       paths_.add_path(TransportKind::tcp_tls);
     }
     if (partner != nullptr && quic_available()) {
@@ -728,6 +789,7 @@ void Runtime::evaluate_transport_paths(Instant now) {
     case TransportKind::udp: next = udp_carrier_.get(); break;
     case TransportKind::tcp_tls: next = tcp_carrier_.get(); break;
     case TransportKind::quic: next = quic_carrier_.get(); break;
+    case TransportKind::icmp: next = icmp_carrier_.get(); break;
   }
   if (next == nullptr) return;
 
@@ -820,6 +882,7 @@ void Runtime::wait_for_work(Instant now) {
   };
   watch(tun_.descriptor());
   watch(transport_.descriptor());
+  if (icmp_transport_.started()) watch(icmp_transport_.descriptor());
   if (tcp_.connected()) {
     watch(tcp_.descriptor());
     if (tcp_.has_pending_output()) watched.back().events |= POLLOUT;

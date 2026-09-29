@@ -10,6 +10,7 @@
 #include <string_view>
 #include <vector>
 
+#include "norr/camouflage.hpp"
 #include "norr/endpoint.hpp"
 #include "norr/file_descriptor.hpp"
 #include "norr/rate_limit.hpp"
@@ -90,6 +91,15 @@ class TcpTransport {
 
   [[nodiscard]] std::expected<bool, TransportError> poll_tls();
 
+  [[nodiscard]] std::expected<void, TransportError> enable_camouflage(
+      CamouflageFramer::Role role, std::string server_name);
+
+  [[nodiscard]] bool camouflage_enabled() const noexcept { return camo_.has_value(); }
+
+  [[nodiscard]] bool camouflage_established() const noexcept { return camo_ready_; }
+
+  [[nodiscard]] std::expected<bool, TransportError> poll_camouflage();
+
   [[nodiscard]] std::expected<bool, TransportError> poll_connect();
 
   void close() noexcept;
@@ -127,6 +137,8 @@ class TcpTransport {
 
   std::vector<std::vector<std::byte>> ready_;
   std::optional<TlsSession> tls_;
+  std::optional<CamouflageFramer> camo_;
+  bool camo_ready_{};
   TcpStats stats_{};
 };
 

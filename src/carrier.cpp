@@ -5,6 +5,131 @@
 #include <array>
 
 namespace norr {
+std::expected<std::size_t, TransportError> UdpCarrier::send_batch(
+    std::span<const OutboundDatagram> datagrams) {
+  if (!obfuscator_.enabled()) return transport_->send_batch(datagrams);
+
+  if (priming_pending_ && !datagrams.empty()) {
+    priming_pending_ = false;
+    std::array<std::byte, kPrimingMaxSize> scratch{};
+    std::array<std::byte, 1> pick{};
+    std::size_t count = kPrimingMinPackets;
+    if (random_bytes(pick)) {
+      count += static_cast<std::size_t>(pick[0]) %
+               (kPrimingMaxPackets - kPrimingMinPackets + 1U);
+    }
+    for (std::size_t index = 0; index < count; ++index) {
+      const auto size = obfuscator_.generate_priming(scratch);
+      if (!size) break;
+      const std::array<OutboundDatagram, 1> wire{
+          OutboundDatagram{.destination = datagrams.front().destination,
+                           .payload = std::span{scratch}.first(*size)}};
+      static_cast<void>(transport_->send_batch(wire));
+    }
+  }
+
+  wrap_slots_.resize(datagrams.size());
+  wrap_batch_.clear();
+  wrap_batch_.reserve(datagrams.size());
+  for (std::size_t index = 0; index < datagrams.size(); ++index) {
+    auto& slot = wrap_slots_[index];
+    slot.assign(datagrams[index].payload.size() + obfuscator_.max_overhead(), std::byte{0});
+    const auto wrapped = obfuscator_.wrap(datagrams[index].payload, slot);
+    if (!wrapped) continue;
+    wrap_batch_.push_back(OutboundDatagram{.destination = datagrams[index].destination,
+                                           .payload = std::span{slot}.first(*wrapped)});
+  }
+  if (wrap_batch_.empty()) return std::size_t{0};
+
+  const auto sent = transport_->send_batch(wrap_batch_);
+  if (!sent) return std::unexpected(sent.error());
+  return std::min(*sent, datagrams.size());
+}
+
+std::expected<std::size_t, TransportError> UdpCarrier::receive_batch(
+    ReceiveBuffers& buffers, std::span<InboundDatagram> out) {
+  const auto received = transport_->receive_batch(buffers, out);
+  if (!obfuscator_.enabled() || !received) return received;
+
+  unwrap_slots_.resize(out.size());
+  std::size_t kept = 0;
+  for (std::size_t index = 0; index < *received; ++index) {
+    auto& slot = unwrap_slots_[kept];
+    slot.assign(out[index].payload.size(), std::byte{0});
+    const auto plain = obfuscator_.unwrap(out[index].payload, slot);
+    if (!plain) continue;
+    out[kept] = InboundDatagram{.source = out[index].source,
+                                .payload = std::span{slot}.first(*plain)};
+    ++kept;
+  }
+  return kept;
+}
+
+
+std::expected<std::size_t, TransportError> IcmpCarrier::send_batch(
+    std::span<const OutboundDatagram> datagrams) {
+  const auto dest = [&](const OutboundDatagram& d) { return d.destination; };
+
+  if (priming_pending_ && !datagrams.empty() && obfuscator_.enabled()) {
+    priming_pending_ = false;
+    std::array<std::byte, kPrimingMaxSize> scratch{};
+    std::array<std::byte, 1> pick{};
+    std::size_t count = kPrimingMinPackets;
+    if (random_bytes(pick)) {
+      count += static_cast<std::size_t>(pick[0]) % (kPrimingMaxPackets - kPrimingMinPackets + 1U);
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+      const auto size = obfuscator_.generate_priming(scratch);
+      if (!size) break;
+      const std::array<OutboundDatagram, 1> wire{
+          OutboundDatagram{.destination = dest(datagrams.front()),
+                           .payload = std::span{scratch}.first(*size)}};
+      static_cast<void>(transport_->send_batch(wire));
+    }
+  }
+
+  if (!obfuscator_.enabled()) return transport_->send_batch(datagrams);
+
+  wrap_slots_.resize(datagrams.size());
+  wrap_batch_.clear();
+  wrap_batch_.reserve(datagrams.size());
+  for (std::size_t i = 0; i < datagrams.size(); ++i) {
+    auto& slot = wrap_slots_[i];
+    slot.assign(datagrams[i].payload.size() + obfuscator_.max_overhead(), std::byte{0});
+    const auto wrapped = obfuscator_.wrap(datagrams[i].payload, slot);
+    if (!wrapped) continue;
+    wrap_batch_.push_back(OutboundDatagram{.destination = datagrams[i].destination,
+                                           .payload = std::span{slot}.first(*wrapped)});
+  }
+  if (wrap_batch_.empty()) return std::size_t{0};
+  const auto sent = transport_->send_batch(wrap_batch_);
+  if (!sent) return std::unexpected(sent.error());
+  return std::min(*sent, datagrams.size());
+}
+
+std::expected<std::size_t, TransportError> IcmpCarrier::receive_batch(
+    ReceiveBuffers& buffers, std::span<InboundDatagram> out) {
+  const auto received = transport_->receive_batch(buffers, out);
+  if (!received) return received;
+
+  std::size_t kept = 0;
+  if (obfuscator_.enabled()) unwrap_slots_.resize(out.size());
+  for (std::size_t i = 0; i < *received; ++i) {
+    const Endpoint source{out[i].source.address(), peer_.port()};
+    if (obfuscator_.enabled()) {
+      auto& slot = unwrap_slots_[kept];
+      slot.assign(out[i].payload.size(), std::byte{0});
+      const auto plain = obfuscator_.unwrap(out[i].payload, slot);
+      if (!plain) continue;
+      out[kept] = InboundDatagram{.source = source, .payload = std::span{slot}.first(*plain)};
+    } else {
+      out[kept] = InboundDatagram{.source = source, .payload = out[i].payload};
+    }
+    ++kept;
+  }
+  return kept;
+}
+
 void TcpCarrier::drive(TcpTransport& transport, bool& tls_started, bool dialing) {
   if (dialing && transport.state() == TcpState::closed) {
     tls_started = false;
@@ -24,6 +149,23 @@ void TcpCarrier::drive(TcpTransport& transport, bool& tls_started, bool dialing)
   }
 
   if (!transport.connected()) return;
+
+  if (camouflage_) {
+    if (!tls_started) {
+      const auto role = dialing ? CamouflageFramer::Role::client : CamouflageFramer::Role::server;
+      if (transport.enable_camouflage(role, sni_)) {
+        tls_started = true;
+      } else {
+        return;
+      }
+    }
+    if (!transport.camouflage_established()) {
+      static_cast<void>(transport.poll_camouflage());
+      return;
+    }
+    if (transport.has_pending_output()) static_cast<void>(transport.flush_output());
+    return;
+  }
 
   if (!tls_started) {
     const auto role = dialing ? TlsRole::client : TlsRole::server;
@@ -61,12 +203,16 @@ void TcpCarrier::poll(Instant now) {
 
 std::expected<std::size_t, TransportError> TcpCarrier::send_batch(
     std::span<const OutboundDatagram> datagrams) {
+  const auto ready = [this](const TcpTransport& conn) {
+    return conn.connected() &&
+           (camouflage_ ? conn.camouflage_established() : conn.tls_established());
+  };
   std::array<TcpTransport*, 8> ready_conns{};
   std::size_t count = 0;
-  if (transport_->connected() && transport_->tls_established()) ready_conns[count++] = transport_;
+  if (ready(*transport_)) ready_conns[count++] = transport_;
   for (auto& conn : extra_) {
     if (count >= ready_conns.size()) break;
-    if (conn.connected() && conn.tls_established()) ready_conns[count++] = &conn;
+    if (ready(conn)) ready_conns[count++] = &conn;
   }
   if (count == 0) return std::unexpected(TransportError::not_started);
 
@@ -103,7 +249,8 @@ std::expected<std::size_t, TransportError> TcpCarrier::receive_batch(
   std::size_t delivered = 0;
   const auto drain = [&](TcpTransport& conn) {
     if (delivered >= out.size()) return;
-    if (!conn.connected() || !conn.tls_established()) return;
+    if (!conn.connected()) return;
+    if (!camouflage_ && !conn.tls_established()) return;
     inbox_.resize(out.size() - delivered);
     const auto received = conn.receive_frames(inbox_);
     if (!received) {

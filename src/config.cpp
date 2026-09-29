@@ -282,6 +282,7 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       else if (value == "udp") config.transport = TransportMode::udp;
       else if (value == "quic") config.transport = TransportMode::quic;
       else if (value == "tcp-tls") config.transport = TransportMode::tcp_tls;
+      else if (value == "icmp") config.transport = TransportMode::icmp;
       else return fail(ConfigError::invalid_value);
     } else if (qualified == "qos.enabled") {
       const auto flag = parse_bool(value);
@@ -307,6 +308,31 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       else if (value == "quic") config.profile = TrafficProfile::quic;
       else if (value == "dns") config.profile = TrafficProfile::dns;
       else return fail(ConfigError::invalid_value);
+    } else if (qualified == "transport.obfuscation") {
+      if (value == "off") config.obfuscation.mode = ObfuscationMode::off;
+      else if (value == "header-mask") config.obfuscation.mode = ObfuscationMode::header_mask;
+      else if (value == "full") config.obfuscation.mode = ObfuscationMode::full;
+      else return fail(ConfigError::invalid_value);
+    } else if (qualified == "transport.junk") {
+      const auto flag = parse_bool(value);
+      if (!flag) return fail(flag.error());
+      config.obfuscation.junk_padding = *flag;
+    } else if (qualified == "transport.junk_max") {
+      const auto max = parse_uint(value);
+      if (!max) return fail(max.error());
+      if (*max == 0 || *max > kMaximumJunkLength) return fail(ConfigError::value_out_of_range);
+      config.obfuscation.junk_max = static_cast<std::uint8_t>(*max);
+    } else if (qualified == "transport.priming") {
+      const auto flag = parse_bool(value);
+      if (!flag) return fail(flag.error());
+      config.obfuscation.priming = *flag;
+    } else if (qualified == "transport.camouflage") {
+      if (value == "off") config.camouflage = CamouflageMode::off;
+      else if (value == "fake-tls") config.camouflage = CamouflageMode::fake_tls;
+      else return fail(ConfigError::invalid_value);
+    } else if (qualified == "transport.sni") {
+      if (value.empty() || value.size() > 253) return fail(ConfigError::invalid_value);
+      config.camouflage_sni = std::string{value};
     } else if (qualified == "fec.mode") {
       if (value == "off") config.fec = FecMode::off;
       else if (value == "light") config.fec = FecMode::light;
@@ -402,6 +428,31 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
   if (!config.network.ipv4 && !config.network.ipv6) {
     return std::unexpected(Diagnostic{ConfigError::incompatible_options, 0,
                                       "network.ipv4 and network.ipv6 are both disabled"});
+  }
+
+  if (config.obfuscation.mode == ObfuscationMode::off &&
+      (config.obfuscation.junk_padding || config.obfuscation.priming)) {
+    return std::unexpected(Diagnostic{ConfigError::incompatible_options, 0,
+                                      "transport.junk/priming require transport.obfuscation"});
+  }
+  if (config.obfuscation.junk_padding &&
+      config.obfuscation.mode != ObfuscationMode::full) {
+    return std::unexpected(Diagnostic{ConfigError::incompatible_options, 0,
+                                      "transport.junk requires transport.obfuscation = full"});
+  }
+  if (config.obfuscation.mode != ObfuscationMode::off &&
+      config.transport != TransportMode::automatic &&
+      config.transport != TransportMode::udp &&
+      config.transport != TransportMode::icmp) {
+    return std::unexpected(Diagnostic{ConfigError::incompatible_options, 0,
+                                      "transport.obfuscation applies to the udp or icmp transport"});
+  }
+
+  if (config.camouflage != CamouflageMode::off &&
+      config.transport != TransportMode::automatic &&
+      config.transport != TransportMode::tcp_tls) {
+    return std::unexpected(Diagnostic{ConfigError::incompatible_options, 0,
+                                      "transport.camouflage applies to the tcp-tls transport"});
   }
 
   return config;

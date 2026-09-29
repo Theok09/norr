@@ -117,7 +117,8 @@ int run(const std::string& path) {
               config->listen_port, runtime.peer_count());
   std::fflush(stdout);
 
-  const auto dialed = runtime.active_transport() == norr::TransportKind::udp
+  const auto kind = runtime.active_transport();
+  const auto dialed = (kind == norr::TransportKind::udp || kind == norr::TransportKind::icmp)
                           ? runtime.dial_configured_peers()
                           : 0;
   if (dialed > 0) std::printf("dialing %zu\n", dialed);

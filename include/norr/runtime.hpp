@@ -163,7 +163,9 @@ class Runtime {
   bool tcp_ready_{};
   bool quic_ready_{};
 
+  IcmpTransport icmp_transport_;
   std::unique_ptr<UdpCarrier> udp_carrier_;
+  std::unique_ptr<IcmpCarrier> icmp_carrier_;
   std::unique_ptr<TcpCarrier> tcp_carrier_;
   std::unique_ptr<QuicCarrier> quic_carrier_;
   PathSelector paths_;

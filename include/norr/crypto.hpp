@@ -70,6 +70,10 @@ struct KeyPair {
 [[nodiscard]] bool constant_time_equal(std::span<const std::byte> left,
                                        std::span<const std::byte> right) noexcept;
 
+[[nodiscard]] std::expected<void, CryptoError> keystream_xor(
+    std::span<const std::byte> key, std::span<const std::byte> nonce,
+    std::span<std::byte> data) noexcept;
+
 void secure_zero(std::span<std::byte> buffer) noexcept;
 
 class TrafficKeys {

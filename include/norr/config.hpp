@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "norr/fec.hpp"
+#include "norr/obfuscation.hpp"
 #include "norr/traffic_profile.hpp"
 
 namespace norr {
@@ -50,7 +51,8 @@ struct ConfigDiagnostic {
 };
 
 enum class NodeRole { server, client };
-enum class TransportMode { automatic, udp, quic, tcp_tls };
+enum class TransportMode { automatic, udp, quic, tcp_tls, icmp };
+enum class CamouflageMode { off, fake_tls };
 
 inline constexpr std::uint16_t kMinimumMtu = 1280;
 inline constexpr std::uint16_t kMaximumMtu = 9000;
@@ -93,11 +95,14 @@ struct Config {
   NetworkConfig network;
   TransportMode transport{TransportMode::automatic};
   std::uint8_t tcp_connections{1};
+  CamouflageMode camouflage{CamouflageMode::off};
+  std::string camouflage_sni{"www.microsoft.com"};
 
   bool qos_enabled{false};
   std::uint64_t qos_rate_bytes{};
   std::uint64_t qos_burst_bytes{};
   FecMode fec{FecMode::off};
+  ObfuscationConfig obfuscation{};
   TrafficProfile profile{TrafficProfile::standard};
   bool metrics_enabled{false};
   std::string metrics_listen;

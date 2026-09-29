@@ -198,6 +198,15 @@ std::expected<bool, TransportError> TcpTransport::poll_tls() {
   return std::unexpected(TransportError::unsupported_platform);
 }
 
+std::expected<void, TransportError> TcpTransport::enable_camouflage(CamouflageFramer::Role,
+                                                                    std::string) {
+  return std::unexpected(TransportError::unsupported_platform);
+}
+
+std::expected<bool, TransportError> TcpTransport::poll_camouflage() {
+  return std::unexpected(TransportError::unsupported_platform);
+}
+
 std::expected<std::size_t, TransportError> TcpTransport::receive_frames(
     std::span<std::span<const std::byte>>) {
   return std::unexpected(TransportError::unsupported_platform);
@@ -291,6 +300,8 @@ void TcpTransport::close() noexcept {
   reassembler_.reset();
   outbox_.clear();
   tls_.reset();
+  camo_.reset();
+  camo_ready_ = false;
 }
 
 std::expected<std::size_t, TransportError> TcpTransport::write_some(
@@ -341,6 +352,24 @@ std::expected<std::size_t, TransportError> TcpTransport::send_frame(
   if (!drained) return std::unexpected(drained.error());
   if (!*drained) return std::unexpected(TransportError::would_block);
 
+  if (camo_.has_value()) {
+    auto wrapped = camo_->wrap(frame);
+    std::size_t written = 0;
+    while (written < wrapped.size()) {
+      const auto sent = write_some(std::span{wrapped}.subspan(written));
+      if (!sent) return std::unexpected(sent.error());
+      if (*sent == 0) break;
+      written += *sent;
+    }
+    if (written < wrapped.size()) {
+      outbox_.insert(outbox_.end(),
+                     wrapped.begin() + static_cast<std::ptrdiff_t>(written), wrapped.end());
+    }
+    stats_.bytes_sent += wrapped.size();
+    ++stats_.frames_sent;
+    return frame.size();
+  }
+
   record_.resize(kTcpLengthPrefixSize + frame.size());
   record_[0] = static_cast<std::byte>((frame.size() >> 8U) & 0xFFU);
   record_[1] = static_cast<std::byte>(frame.size() & 0xFFU);
@@ -389,12 +418,79 @@ std::expected<bool, TransportError> TcpTransport::poll_tls() {
   return *done;
 }
 
+std::expected<void, TransportError> TcpTransport::enable_camouflage(CamouflageFramer::Role role,
+                                                                    std::string server_name) {
+  if (!socket_.valid()) return std::unexpected(TransportError::not_started);
+  if (camo_.has_value() || tls_.has_value()) {
+    return std::unexpected(TransportError::already_started);
+  }
+  camo_.emplace(role, std::move(server_name));
+  camo_ready_ = false;
+  auto hello = camo_->open();
+  if (!hello.empty()) {
+    outbox_.insert(outbox_.end(), hello.begin(), hello.end());
+    camo_ready_ = true;
+  }
+  return {};
+}
+
+std::expected<bool, TransportError> TcpTransport::poll_camouflage() {
+  if (!camo_.has_value()) return true;
+  if (state_ != TcpState::connected) return std::unexpected(TransportError::not_started);
+  if (!outbox_.empty()) {
+    const auto drained = flush_output();
+    if (!drained) return std::unexpected(drained.error());
+  }
+  return camo_ready_;
+}
+
 std::expected<std::size_t, TransportError> TcpTransport::receive_frames(
     std::span<std::span<const std::byte>> out) {
   if (state_ != TcpState::connected) return std::unexpected(TransportError::not_started);
   if (out.empty()) return std::size_t{0};
 
   if (read_buffer_.size() < 16384) read_buffer_.resize(16384);
+
+  if (camo_.has_value()) {
+    while (true) {
+      const auto received = ::read(socket_.get(), read_buffer_.data(), read_buffer_.size());
+      if (received == 0) {
+        state_ = TcpState::failed;
+        ++stats_.disconnects;
+        break;
+      }
+      if (received < 0) {
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+        state_ = TcpState::failed;
+        return std::unexpected(TransportError::receive_failed);
+      }
+      camo_->feed(std::span{read_buffer_}.first(static_cast<std::size_t>(received)));
+      stats_.bytes_received += static_cast<std::uint64_t>(received);
+    }
+
+    ready_.clear();
+    while (ready_.size() < out.size()) {
+      const auto payload = camo_->next_payload();
+      if (!payload) break;
+      ready_.emplace_back(payload->begin(), payload->end());
+    }
+    if (camo_->violated()) {
+      state_ = TcpState::failed;
+      return std::unexpected(TransportError::receive_failed);
+    }
+
+    auto reply = camo_->take_handshake_reply();
+    if (!reply.empty()) {
+      outbox_.insert(outbox_.end(), reply.begin(), reply.end());
+      static_cast<void>(flush_output());
+    }
+    if (camo_->handshake_done()) camo_ready_ = true;
+
+    for (std::size_t index = 0; index < ready_.size(); ++index) out[index] = ready_[index];
+    stats_.frames_received += ready_.size();
+    return ready_.size();
+  }
 
   while (true) {
     ssize_t received = 0;

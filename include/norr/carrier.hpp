@@ -12,6 +12,8 @@
 #include <vector>
 
 #include "norr/endpoint.hpp"
+#include "norr/icmp_transport.hpp"
+#include "norr/obfuscation.hpp"
 #include "norr/path_selector.hpp"
 #include "norr/quic_transport.hpp"
 #include "norr/noise.hpp"
@@ -40,28 +42,76 @@ class UdpCarrier final : public Carrier {
  public:
   explicit UdpCarrier(UdpTransport& transport) noexcept : transport_(&transport) {}
 
+  void configure_obfuscation(const ObfuscationConfig& config,
+                             const PresharedKey& preshared) {
+    obfuscator_.configure(config, preshared);
+  }
+
+  [[nodiscard]] bool obfuscating() const noexcept { return obfuscator_.enabled(); }
+
   [[nodiscard]] TransportKind kind() const noexcept override { return TransportKind::udp; }
 
   [[nodiscard]] std::expected<std::size_t, TransportError> send_batch(
-      std::span<const OutboundDatagram> datagrams) override {
-    return transport_->send_batch(datagrams);
-  }
+      std::span<const OutboundDatagram> datagrams) override;
 
   [[nodiscard]] std::expected<std::size_t, TransportError> receive_batch(
-      ReceiveBuffers& buffers, std::span<InboundDatagram> out) override {
-    return transport_->receive_batch(buffers, out);
-  }
+      ReceiveBuffers& buffers, std::span<InboundDatagram> out) override;
 
   [[nodiscard]] const TransportStats& stats() const noexcept override {
     return transport_->stats();
   }
 
   [[nodiscard]] std::size_t max_payload() const noexcept override {
-    return UdpTransport::kDefaultDatagramSize;
+    const auto base = UdpTransport::kDefaultDatagramSize;
+    const auto overhead = obfuscator_.max_overhead();
+    return overhead < base ? base - overhead : base;
   }
+
+  void prime() noexcept { priming_pending_ = obfuscator_.config().priming; }
 
  private:
   UdpTransport* transport_;
+  Obfuscator obfuscator_{};
+  std::vector<std::vector<std::byte>> wrap_slots_;
+  std::vector<OutboundDatagram> wrap_batch_;
+  std::vector<std::vector<std::byte>> unwrap_slots_;
+  bool priming_pending_{};
+};
+
+class IcmpCarrier final : public Carrier {
+ public:
+  IcmpCarrier(IcmpTransport& transport, const Endpoint& peer) noexcept
+      : transport_(&transport), peer_(peer) {}
+
+  void configure_obfuscation(const ObfuscationConfig& config, const PresharedKey& preshared) {
+    obfuscator_.configure(config, preshared);
+  }
+  void prime() noexcept { priming_pending_ = obfuscator_.config().priming; }
+
+  [[nodiscard]] TransportKind kind() const noexcept override { return TransportKind::icmp; }
+
+  [[nodiscard]] std::expected<std::size_t, TransportError> send_batch(
+      std::span<const OutboundDatagram> datagrams) override;
+
+  [[nodiscard]] std::expected<std::size_t, TransportError> receive_batch(
+      ReceiveBuffers& buffers, std::span<InboundDatagram> out) override;
+
+  [[nodiscard]] const TransportStats& stats() const noexcept override { return transport_->stats(); }
+
+  [[nodiscard]] std::size_t max_payload() const noexcept override {
+    const auto base = IcmpTransport::kDefaultDatagramSize;
+    const auto overhead = obfuscator_.max_overhead() + kIcmpHeaderSize;
+    return overhead < base ? base - overhead : base;
+  }
+
+ private:
+  IcmpTransport* transport_;
+  Endpoint peer_{};
+  Obfuscator obfuscator_{};
+  std::vector<std::vector<std::byte>> wrap_slots_;
+  std::vector<OutboundDatagram> wrap_batch_;
+  std::vector<std::vector<std::byte>> unwrap_slots_;
+  bool priming_pending_{};
 };
 
 class TcpCarrier final : public Carrier {
@@ -85,8 +135,14 @@ class TcpCarrier final : public Carrier {
 
   void poll(Instant now);
 
+  void set_camouflage(std::string server_name) {
+    camouflage_ = true;
+    sni_ = std::move(server_name);
+  }
+
   [[nodiscard]] bool ready() const noexcept {
-    return transport_->connected() && transport_->tls_established();
+    return transport_->connected() &&
+           (camouflage_ ? transport_->camouflage_established() : transport_->tls_established());
   }
 
   void set_connections(std::size_t count) {
@@ -108,6 +164,8 @@ class TcpCarrier final : public Carrier {
   Endpoint peer_{};
   bool dialing_{};
   bool tls_started_{};
+  bool camouflage_{};
+  std::string sni_{};
   PresharedKey preshared_{};
   std::vector<std::span<const std::byte>> inbox_;
   TransportStats stats_{};
