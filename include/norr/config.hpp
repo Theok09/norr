@@ -97,6 +97,7 @@ struct Config {
   std::uint8_t tcp_connections{1};
   CamouflageMode camouflage{CamouflageMode::off};
   std::string camouflage_sni{"www.microsoft.com"};
+  std::vector<std::string> spoof_source_ips;
 
   bool qos_enabled{false};
   std::uint64_t qos_rate_bytes{};

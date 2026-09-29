@@ -70,6 +70,7 @@ preserve_source = true
 | --- | --- | --- |
 | `mode` | `udp`, `tcp-tls`, `quic`, or `auto` to fall back automatically. | `auto` |
 | `connections` | Parallel TCP connections for the `tcp-tls` carrier, 1 to 8. More connections avoid head-of-line blocking on a clean TCP path. | `1` |
+| `spoof_source_ips` | Comma-separated source addresses the `udp` carrier forges on outbound datagrams, rotated per packet. The peer replies to the real endpoint learned in the handshake, so a stateful middlebox sees only unidirectional flows. Requires `CAP_NET_ADMIN`. | |
 
 ## `[fec]`
 

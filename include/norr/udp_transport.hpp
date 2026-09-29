@@ -12,6 +12,7 @@
 
 #include "norr/endpoint.hpp"
 #include "norr/file_descriptor.hpp"
+#include "norr/spoof.hpp"
 
 namespace norr {
 enum class TransportError {
@@ -120,6 +121,9 @@ class UdpTransport {
   [[nodiscard]] std::expected<void, TransportError> set_mark(std::uint32_t mark);
   [[nodiscard]] int descriptor() const noexcept { return socket_.get(); }
 
+  [[nodiscard]] std::expected<void, TransportError> enable_spoofing(std::vector<Address> sources);
+  [[nodiscard]] bool spoofing() const noexcept { return spoof_.enabled(); }
+
   [[nodiscard]] std::expected<std::uint16_t, TransportError> local_port() const;
 
   [[nodiscard]] std::expected<std::size_t, TransportError> send_batch(
@@ -136,6 +140,8 @@ class UdpTransport {
   [[nodiscard]] const TransportStats& stats() const noexcept { return stats_; }
 
  private:
+  [[nodiscard]] std::expected<void, TransportError> apply_spoof_options();
+
   FileDescriptor socket_;
 #if defined(__linux__)
 
@@ -145,5 +151,6 @@ class UdpTransport {
   TransportStats stats_{};
   std::vector<InboundDatagram> backlog_;
   std::size_t backlog_next_{};
+  SpoofPool spoof_{};
 };
 }

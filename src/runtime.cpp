@@ -121,6 +121,20 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
   if (!bind_address) {
     return std::unexpected(Diagnostic{RuntimeError::bind_failed, bind_text});
   }
+  if (!config.spoof_source_ips.empty()) {
+    std::vector<Address> sources;
+    sources.reserve(config.spoof_source_ips.size());
+    for (const auto& text : config.spoof_source_ips) {
+      const auto address = parse_address(text);
+      if (!address) return std::unexpected(Diagnostic{RuntimeError::bind_failed, text});
+      sources.push_back(*address);
+    }
+    if (const auto spoofed = transport_.enable_spoofing(std::move(sources)); !spoofed) {
+      return std::unexpected(Diagnostic{RuntimeError::bind_failed,
+                                        "transport.spoof_source_ips: " +
+                                            std::string{transport_error_message(spoofed.error())}});
+    }
+  }
   if (const auto bound = transport_.start(*bind_address); !bound) {
     return std::unexpected(Diagnostic{RuntimeError::bind_failed,
                                       std::string{transport_error_message(bound.error())}});

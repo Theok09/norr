@@ -14,6 +14,19 @@
 #include <unistd.h>
 
 #include <cerrno>
+
+#ifndef IP_TRANSPARENT
+#define IP_TRANSPARENT 19
+#endif
+#ifndef IP_FREEBIND
+#define IP_FREEBIND 15
+#endif
+#ifndef IPV6_TRANSPARENT
+#define IPV6_TRANSPARENT 75
+#endif
+#ifndef IPV6_FREEBIND
+#define IPV6_FREEBIND 78
+#endif
 #endif
 
 namespace norr {
@@ -78,6 +91,29 @@ namespace {
   return ::fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0;
 }
 
+[[nodiscard]] std::size_t write_source_pktinfo(cmsghdr* message, AddressFamily family,
+                                               const Address& source) noexcept {
+  if (family == AddressFamily::ipv4) {
+    message->cmsg_level = IPPROTO_IP;
+    message->cmsg_type = IP_PKTINFO;
+    message->cmsg_len = CMSG_LEN(sizeof(in_pktinfo));
+    in_pktinfo info{};
+    std::memcpy(&info.ipi_spec_dst, source.bytes().data(), 4);
+    std::memcpy(CMSG_DATA(message), &info, sizeof(info));
+    return CMSG_SPACE(sizeof(in_pktinfo));
+  }
+  message->cmsg_level = IPPROTO_IPV6;
+  message->cmsg_type = IPV6_PKTINFO;
+  message->cmsg_len = CMSG_LEN(sizeof(in6_pktinfo));
+  in6_pktinfo info{};
+  std::memcpy(&info.ipi6_addr, source.bytes().data(), 16);
+  std::memcpy(CMSG_DATA(message), &info, sizeof(info));
+  return CMSG_SPACE(sizeof(in6_pktinfo));
+}
+
+inline constexpr std::size_t kControlSpace =
+    CMSG_SPACE(sizeof(std::uint16_t)) + CMSG_SPACE(sizeof(in6_pktinfo));
+
 #endif
 }
 
@@ -110,6 +146,14 @@ void UdpTransport::stop() noexcept {
 }
 
 std::expected<void, TransportError> UdpTransport::set_mark(std::uint32_t) {
+  return std::unexpected(TransportError::unsupported_platform);
+}
+
+std::expected<void, TransportError> UdpTransport::enable_spoofing(std::vector<Address>) {
+  return std::unexpected(TransportError::unsupported_platform);
+}
+
+std::expected<void, TransportError> UdpTransport::apply_spoof_options() {
   return std::unexpected(TransportError::unsupported_platform);
 }
 
@@ -207,6 +251,10 @@ std::expected<void, TransportError> UdpTransport::start(const Endpoint& bind_add
   backlog_.clear();
   backlog_next_ = 0;
 
+  if (const auto spoofed = apply_spoof_options(); !spoofed) {
+    return std::unexpected(spoofed.error());
+  }
+
   constexpr int kSocketBufferBytes = 8 * 1024 * 1024;
   for (const int option : {SO_RCVBUFFORCE, SO_SNDBUFFORCE}) {
     if (::setsockopt(socket_.get(), SOL_SOCKET, option, &kSocketBufferBytes,
@@ -227,6 +275,27 @@ std::expected<void, TransportError> UdpTransport::set_mark(std::uint32_t mark) {
     return std::unexpected(TransportError::socket_option_failed);
   }
   return {};
+}
+
+std::expected<void, TransportError> UdpTransport::apply_spoof_options() {
+  if (!spoof_.enabled()) return {};
+  if (!socket_.valid()) return std::unexpected(TransportError::not_started);
+
+  const int on = 1;
+  const int transparent = family_ == AddressFamily::ipv4 ? IP_TRANSPARENT : IPV6_TRANSPARENT;
+  const int freebind = family_ == AddressFamily::ipv4 ? IP_FREEBIND : IPV6_FREEBIND;
+  const int level = family_ == AddressFamily::ipv4 ? IPPROTO_IP : IPPROTO_IPV6;
+  if (::setsockopt(socket_.get(), level, transparent, &on, sizeof(on)) != 0) {
+    return std::unexpected(TransportError::socket_option_failed);
+  }
+  static_cast<void>(::setsockopt(socket_.get(), level, freebind, &on, sizeof(on)));
+  return {};
+}
+
+std::expected<void, TransportError> UdpTransport::enable_spoofing(std::vector<Address> sources) {
+  spoof_ = SpoofPool{std::move(sources)};
+  if (!socket_.valid()) return {};
+  return apply_spoof_options();
 }
 
 std::expected<std::uint16_t, TransportError> UdpTransport::local_port() const {
@@ -252,8 +321,7 @@ std::expected<std::size_t, TransportError> UdpTransport::send_batch(
   std::array<sockaddr_storage, kDefaultBatchSize> addresses{};
   std::array<std::size_t, kDefaultBatchSize> members{};
   std::array<std::size_t, kDefaultBatchSize> firsts{};
-  alignas(cmsghdr) std::array<std::array<std::byte, CMSG_SPACE(sizeof(std::uint16_t))>,
-                              kDefaultBatchSize> controls{};
+  alignas(cmsghdr) std::array<std::array<std::byte, kControlSpace>, kDefaultBatchSize> controls{};
 
   const bool gso = offloads_.udp_gso;
   std::size_t groups = 0;
@@ -296,19 +364,36 @@ std::expected<std::size_t, TransportError> UdpTransport::send_batch(
   }
   if (groups == 0) return count;
 
+  const bool spoof = spoof_.enabled();
   for (std::size_t group = 0; group < groups; ++group) {
     auto& header = messages[group].msg_hdr;
     header.msg_iovlen = static_cast<decltype(header.msg_iovlen)>(members[group]);
-    if (members[group] > 1) {
-      header.msg_control = controls[group].data();
-      header.msg_controllen = static_cast<decltype(header.msg_controllen)>(controls[group].size());
-      auto* message = CMSG_FIRSTHDR(&header);
+
+    const bool want_gso = members[group] > 1;
+    if (!want_gso && !spoof) continue;
+
+    header.msg_control = controls[group].data();
+    header.msg_controllen = static_cast<decltype(header.msg_controllen)>(controls[group].size());
+    std::size_t used = 0;
+    auto* message = CMSG_FIRSTHDR(&header);
+
+    if (want_gso && message != nullptr) {
       message->cmsg_level = SOL_UDP;
       message->cmsg_type = UDP_SEGMENT;
       message->cmsg_len = CMSG_LEN(sizeof(std::uint16_t));
       const auto size = static_cast<std::uint16_t>(vectors[firsts[group]].iov_len);
       std::memcpy(CMSG_DATA(message), &size, sizeof(size));
+      used += CMSG_SPACE(sizeof(std::uint16_t));
+      message = CMSG_NXTHDR(&header, message);
     }
+
+    if (spoof && message != nullptr) {
+      const auto& source = spoof_.next();
+      if (source.family() == family_) used += write_source_pktinfo(message, family_, source);
+    }
+
+    header.msg_control = used > 0 ? controls[group].data() : nullptr;
+    header.msg_controllen = static_cast<decltype(header.msg_controllen)>(used);
   }
 
   std::size_t sent_groups = 0;
@@ -468,7 +553,7 @@ std::expected<std::size_t, TransportError> UdpTransport::send_segmented(
   vector.iov_base = const_cast<std::byte*>(payload.data());
   vector.iov_len = payload.size();
 
-  alignas(cmsghdr) std::array<std::byte, CMSG_SPACE(sizeof(std::uint16_t))> control{};
+  alignas(cmsghdr) std::array<std::byte, kControlSpace> control{};
 
   msghdr header{};
   header.msg_name = &storage;
@@ -478,12 +563,22 @@ std::expected<std::size_t, TransportError> UdpTransport::send_segmented(
   header.msg_control = control.data();
   header.msg_controllen = static_cast<decltype(header.msg_controllen)>(control.size());
 
+  std::size_t used = 0;
   auto* message = CMSG_FIRSTHDR(&header);
   message->cmsg_level = SOL_UDP;
   message->cmsg_type = UDP_SEGMENT;
   message->cmsg_len = CMSG_LEN(sizeof(std::uint16_t));
   const auto segment = static_cast<std::uint16_t>(segment_size);
   std::memcpy(CMSG_DATA(message), &segment, sizeof(segment));
+  used += CMSG_SPACE(sizeof(std::uint16_t));
+
+  if (spoof_.enabled()) {
+    if (auto* next = CMSG_NXTHDR(&header, message); next != nullptr) {
+      const auto& source = spoof_.next();
+      if (source.family() == family_) used += write_source_pktinfo(next, family_, source);
+    }
+  }
+  header.msg_controllen = static_cast<decltype(header.msg_controllen)>(used);
 
   const auto written = ::sendmsg(socket_.get(), &header, 0);
   if (written < 0) {

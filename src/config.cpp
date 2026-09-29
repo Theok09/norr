@@ -333,6 +333,12 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
     } else if (qualified == "transport.sni") {
       if (value.empty() || value.size() > 253) return fail(ConfigError::invalid_value);
       config.camouflage_sni = std::string{value};
+    } else if (qualified == "transport.spoof_source_ips") {
+      for (const auto part : split_list(value)) {
+        if (!parse_address(part)) return fail(ConfigError::invalid_value);
+        config.spoof_source_ips.emplace_back(part);
+      }
+      if (config.spoof_source_ips.empty()) return fail(ConfigError::invalid_value);
     } else if (qualified == "fec.mode") {
       if (value == "off") config.fec = FecMode::off;
       else if (value == "light") config.fec = FecMode::light;
