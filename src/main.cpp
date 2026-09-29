@@ -19,7 +19,10 @@
 #include "norr/worker.hpp"
 
 namespace {
-constexpr std::string_view kVersion = "0.2.0";
+#ifndef NORR_VERSION
+#define NORR_VERSION "0.0.0"
+#endif
+constexpr std::string_view kVersion = NORR_VERSION;
 
 int usage() {
   std::fputs(

@@ -196,6 +196,7 @@ endif()
 
 add_executable(norrd src/main.cpp)
 target_link_libraries(norrd PRIVATE norr_core)
+target_compile_definitions(norrd PRIVATE NORR_VERSION="${PROJECT_VERSION}")
 if(NORR_STATIC)
     target_link_options(norrd PRIVATE -static)
     set_target_properties(norrd PROPERTIES LINK_SEARCH_START_STATIC ON LINK_SEARCH_END_STATIC ON)
