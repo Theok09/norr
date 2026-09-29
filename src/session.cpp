@@ -154,7 +154,9 @@ std::optional<Session::LossSample> Session::take_loss_sample() noexcept {
   const auto expected = highest > sample_base_ ? highest - sample_base_ : 0;
   if (expected < 64) return std::nullopt;
   const auto late = std::min(sample_late_, sample_recovered_);
-  const auto direct = sample_received_ - sample_recovered_ + late;
+  const auto non_recovered =
+      sample_received_ > sample_recovered_ ? sample_received_ - sample_recovered_ : 0;
+  const auto direct = non_recovered + late;
   const auto fraction_missing = [&](std::uint64_t arrived) {
     return arrived >= expected ? 0.0
                                : 1.0 - static_cast<double>(arrived) / static_cast<double>(expected);

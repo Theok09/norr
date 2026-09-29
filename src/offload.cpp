@@ -178,7 +178,11 @@ bool expand_offloaded(const VirtioHeader& header, std::span<std::byte> packet,
       tcp ? static_cast<std::size_t>(static_cast<std::uint8_t>(packet[ip_length + 12]) >> 4U) * 4U
           : 8U;
   const auto headers = ip_length + transport_length;
-  if (transport_length < 8 || headers > packet.size()) return false;
+  const std::size_t min_transport = tcp ? 20U : 8U;
+  if (transport_length < min_transport || (tcp && transport_length > 60) ||
+      headers > packet.size()) {
+    return false;
+  }
 
   const auto payload = packet.subspan(headers);
   const std::size_t segment = header.gso_size;

@@ -264,8 +264,12 @@ std::expected<std::size_t, TransportError> TcpCarrier::receive_batch(
     }
   };
 
-  drain(*transport_);
-  for (auto& conn : extra_) drain(conn);
+  const auto total = extra_.size() + 1;
+  for (std::size_t offset = 0; offset < total; ++offset) {
+    const auto pick = (drain_rr_ + offset) % total;
+    drain(pick == 0 ? *transport_ : extra_[pick - 1]);
+  }
+  ++drain_rr_;
   return delivered;
 }
 

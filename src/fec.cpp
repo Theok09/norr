@@ -164,7 +164,7 @@ void multiply_add(std::span<std::byte> accumulator, std::span<const std::byte> s
 std::size_t parity_needed(std::size_t data, double loss, std::size_t limit) noexcept {
   if (data == 0 || limit == 0) return 0;
   const auto p = std::clamp(loss, 0.0, 0.5);
-  if (p <= 0.0) return limit;
+  if (p <= 0.0) return 0;
   const auto odds = p / (1.0 - p);
   for (std::size_t rows = 1; rows < limit; ++rows) {
     const auto total = data + rows;

@@ -883,9 +883,22 @@ void Runtime::wait_for_work(Instant now) {
   watch(tun_.descriptor());
   watch(transport_.descriptor());
   if (icmp_transport_.started()) watch(icmp_transport_.descriptor());
-  if (tcp_.connected()) {
-    watch(tcp_.descriptor());
-    if (tcp_.has_pending_output()) watched.back().events |= POLLOUT;
+  const auto watch_tcp = [&](const TcpTransport& connection) {
+    const auto before = watched.size();
+    if (connection.state() == TcpState::connecting) {
+      watch(connection.descriptor());
+      if (watched.size() > before) watched.back().events = POLLOUT;
+    } else if (connection.connected()) {
+      watch(connection.descriptor());
+      if (watched.size() > before && connection.has_pending_output()) {
+        watched.back().events |= POLLOUT;
+      }
+    }
+  };
+  if (active_kind_ == TransportKind::tcp_tls && tcp_carrier_ != nullptr) {
+    tcp_carrier_->visit_connections(watch_tcp);
+  } else if (active_kind_ == TransportKind::tcp_tls) {
+    watch_tcp(tcp_);
   }
   if (tcp_listener_.listening()) watch(tcp_listener_.descriptor());
   if (metrics_.listening()) watch(metrics_.descriptor());

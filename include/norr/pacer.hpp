@@ -25,7 +25,8 @@ class Pacer {
   [[nodiscard]] double rate_bytes_per_second() const noexcept { return rate_; }
 
   void set_rate_bytes_per_second(double rate) noexcept {
-    if (rate > 0.0) rate_ = rate;
+    rate_ = rate > 0.0 ? rate : 0.0;
+    enabled_ = rate_ > 0.0;
   }
   [[nodiscard]] std::uint64_t paced_bytes() const noexcept { return paced_bytes_; }
   [[nodiscard]] std::uint64_t deferred() const noexcept { return deferred_; }

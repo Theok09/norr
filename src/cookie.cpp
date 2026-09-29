@@ -100,9 +100,7 @@ void CookieIssuer::refresh(Instant now) {
     has_previous_ = true;
   }
 
-  if (!random_bytes(secret_)) {
-    secret_ = {};
-  }
+  if (!random_bytes(secret_)) return;
   secret_created_ = now;
 }
 

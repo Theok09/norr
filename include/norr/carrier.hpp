@@ -157,6 +157,12 @@ class TcpCarrier final : public Carrier {
     extra_started_.push_back(false);
   }
 
+  template <typename Fn>
+  void visit_connections(Fn&& fn) {
+    fn(*transport_);
+    for (auto& connection : extra_) fn(connection);
+  }
+
  private:
   void drive(TcpTransport& transport, bool& tls_started, bool dialing);
 
@@ -173,6 +179,7 @@ class TcpCarrier final : public Carrier {
   std::vector<TcpTransport> extra_;
   std::vector<bool> extra_started_;
   std::size_t rr_{0};
+  std::size_t drain_rr_{0};
 };
 
 class QuicCarrier final : public Carrier {

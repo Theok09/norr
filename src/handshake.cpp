@@ -36,7 +36,8 @@ std::expected<HandshakeMessage, HandshakeError> HandshakeMachine::receive(
     return HandshakeMessage::none;
   }
 
-  if (state_ == HandshakeState::established && message == HandshakeMessage::rekey_init) {
+  if ((state_ == HandshakeState::established || state_ == HandshakeState::rekeying) &&
+      message == HandshakeMessage::rekey_init) {
     if (generation_ == kMaximumKeyGeneration) {
       return std::unexpected(HandshakeError::generation_exhausted);
     }

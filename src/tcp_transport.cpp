@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -275,13 +276,21 @@ std::expected<bool, TransportError> TcpTransport::poll_connect() {
   if (state_ == TcpState::connected) return true;
   if (state_ != TcpState::connecting) return std::unexpected(TransportError::not_started);
 
+  pollfd probe{.fd = socket_.get(), .events = POLLOUT, .revents = 0};
+  const auto ready = ::poll(&probe, 1, 0);
+  if (ready < 0) {
+    if (errno == EINTR) return false;
+    state_ = TcpState::failed;
+    return std::unexpected(TransportError::socket_option_failed);
+  }
+  if (ready == 0 || (probe.revents & (POLLOUT | POLLERR | POLLHUP)) == 0) return false;
+
   int error = 0;
   socklen_t length = sizeof(error);
   if (::getsockopt(socket_.get(), SOL_SOCKET, SO_ERROR, &error, &length) != 0) {
     state_ = TcpState::failed;
     return std::unexpected(TransportError::socket_option_failed);
   }
-  if (error == EINPROGRESS || error == EALREADY) return false;
   if (error != 0) {
     state_ = TcpState::failed;
     socket_.reset();
@@ -429,7 +438,7 @@ std::expected<void, TransportError> TcpTransport::enable_camouflage(CamouflageFr
   auto hello = camo_->open();
   if (!hello.empty()) {
     outbox_.insert(outbox_.end(), hello.begin(), hello.end());
-    camo_ready_ = true;
+    static_cast<void>(flush_output());
   }
   return {};
 }
