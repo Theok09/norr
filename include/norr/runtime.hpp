@@ -161,6 +161,7 @@ class Runtime {
   bool handled_control_{};
   std::atomic<bool> reload_requested_{false};
   bool tcp_ready_{};
+  Instant tcp_accepted_at_{};
   bool quic_ready_{};
 
   IcmpTransport icmp_transport_;

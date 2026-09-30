@@ -658,6 +658,7 @@ void Runtime::service_tcp_carrier(Instant now) {
     if (incoming && incoming->has_value()) {
       tcp_ = std::move(**incoming);
       tcp_.set_mark(fwmark_);
+      tcp_accepted_at_ = now;
     }
   } else if (tcp_listener_.listening() && tcp_carrier != nullptr && tcp_carrier->wants_more()) {
     auto incoming = tcp_listener_.accept();
@@ -665,6 +666,23 @@ void Runtime::service_tcp_carrier(Instant now) {
       auto conn = std::move(**incoming);
       conn.set_mark(fwmark_);
       tcp_carrier->adopt(std::move(conn));
+    }
+  }
+
+  if (tcp_listener_.listening() && tcp_.connected() && tcp_accepted_at_ != Instant{} &&
+      now - tcp_accepted_at_ > std::chrono::seconds{15}) {
+    bool any_received = false;
+    for (PeerId peer = 1; peer <= peer_count_; ++peer) {
+      auto session = sessions_.find_by_peer(peer);
+      if (session != nullptr && session->has_received()) {
+        any_received = true;
+        break;
+      }
+    }
+    if (!any_received) {
+      tcp_.close();
+      tcp_accepted_at_ = Instant{};
+      tcp_ready_ = false;
     }
   }
 
@@ -886,6 +904,11 @@ void Runtime::wait_for_work(Instant now) {
   if (tcp_.connected()) {
     watch(tcp_.descriptor());
     if (tcp_.has_pending_output()) watched.back().events |= POLLOUT;
+  }
+  if (auto* tcp_carrier = dynamic_cast<TcpCarrier*>(carrier_); tcp_carrier != nullptr) {
+    tcp_carrier->for_each_descriptor([&](int descriptor) {
+      if (descriptor != tcp_.descriptor()) watch(descriptor);
+    });
   }
   if (tcp_listener_.listening()) watch(tcp_listener_.descriptor());
   if (metrics_.listening()) watch(metrics_.descriptor());

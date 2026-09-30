@@ -157,6 +157,14 @@ class TcpCarrier final : public Carrier {
     extra_started_.push_back(false);
   }
 
+  template <typename Fn>
+  void for_each_descriptor(Fn&& fn) const {
+    if (transport_->connected()) fn(transport_->descriptor());
+    for (const auto& conn : extra_) {
+      if (conn.connected()) fn(conn.descriptor());
+    }
+  }
+
  private:
   void drive(TcpTransport& transport, bool& tls_started, bool dialing);
 
