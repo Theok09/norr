@@ -1,0 +1,7 @@
+[Unit]
+Description=run norr failover router
+[Timer]
+OnBootSec=20
+OnUnitActiveSec=15
+[Install]
+WantedBy=timers.target

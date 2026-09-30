@@ -1,0 +1,109 @@
+#!/bin/bash
+# Layer-3 closed-loop transport controller.
+# Measures RTT + loss of each tunnel (TCP-connect time to the 2053 service),
+# then steers the 2053 DNAT to the best healthy transport with hysteresis.
+# Policy: prefer udp (lowest latency, no HoL); fall to camo, then icmp, only
+# when udp is unreachable OR measurably degraded (throttled).
+
+STATE=/run/norr-failover.active
+HYST=/run/norr-failover.hyst
+METRICS=/run/norr-failover.metrics
+
+exec 9>/run/norr-failover.lock
+flock -n 9 || exit 0
+
+declare -A IP=(  [udp]=10.111.0.1 [camo]=10.121.0.1 [icmp]=10.141.0.1 )
+declare -A TUN=( [udp]=norr2      [camo]=norr3      [icmp]=norr4 )
+ORDER="udp camo icmp"
+
+PROBES=5          # connects per measurement
+LOSS_OK=60        # need >= this % of probes to succeed to count as healthy
+LAT_BAD=250       # ms: avg connect slower than this = unhealthy even if reachable
+MARGIN=25         # ms: a challenger must beat the current path by this much to switch
+SWITCH_HYST=2     # consecutive rounds a challenger must win before we switch
+declare -A BIAS=( [udp]=0 [icmp]=5 [camo]=30 )  # HoL penalty added to measured rtt
+
+# measure <transport> -> echoes "success_pct median_ms" (median is robust to a single slow/lost probe)
+measure(){
+  local ip=${IP[$1]} ok=0 t0 t1; local -a v=()
+  for _ in $(seq 1 $PROBES); do
+    t0=$(date +%s%N)
+    if timeout 2 bash -c "echo >/dev/tcp/$ip/2053" 2>/dev/null; then
+      t1=$(date +%s%N); v+=( $(( (t1 - t0) / 1000000 )) ); ok=$((ok + 1))
+    fi
+  done
+  local pct=$(( ok * 100 / PROBES )) med=9999
+  if [ $ok -gt 0 ]; then
+    local IFS=$'\n'; local -a s=($(sort -n <<<"${v[*]}"))
+    med=${s[$(( ok / 2 ))]}
+  fi
+  echo "$pct $med"
+}
+
+apply(){
+  local t=$1
+  while iptables -t nat -S PREROUTING | grep -q failover2053; do
+    iptables -t nat -D PREROUTING $(iptables -t nat -S PREROUTING | grep failover2053 | head -1 | sed "s/^-A PREROUTING //")
+  done
+  while iptables -t nat -S POSTROUTING | grep -q failover2053; do
+    iptables -t nat -D POSTROUTING $(iptables -t nat -S POSTROUTING | grep failover2053 | head -1 | sed "s/^-A POSTROUTING //")
+  done
+  iptables -t nat -A PREROUTING ! -i ${TUN[$t]} -p tcp --dport 2053 -m addrtype --dst-type LOCAL -m comment --comment failover2053 -j DNAT --to-destination ${IP[$t]}:2053
+  iptables -t nat -A POSTROUTING -d ${IP[$t]}/32 -o ${TUN[$t]} -p tcp --dport 2053 -m comment --comment failover2053 -j MASQUERADE
+  echo "$t" > $STATE
+  logger -t norr-failover "2053 -> $t (${IP[$t]}) loss=$((100-LPCT))% rtt=${LAVG}ms"
+}
+
+# --- measure everything once, record metrics ---
+: > $METRICS
+declare -A PCT AVG
+for t in $ORDER; do
+  read -r p a <<<"$(measure "$t")"
+  PCT[$t]=$p; AVG[$t]=$a
+  printf '%s loss=%s%% rtt=%sms\n' "$t" "$((100 - p))" "$a" >> $METRICS
+done
+
+is_healthy(){ [ "${PCT[$1]}" -ge "$LOSS_OK" ] && [ "${AVG[$1]}" -le "$LAT_BAD" ]; }
+score(){ echo $(( AVG[$1] + BIAS[$1] )); }  # lower is better
+
+# promote <target>: switch to it once it has been the pick for SWITCH_HYST rounds running
+promote(){
+  if [ "$(cat $HYST 2>/dev/null)" = "$1" ]; then
+    LPCT=${PCT[$1]}; LAVG=${AVG[$1]}; apply "$1"; rm -f $HYST
+  else
+    echo "$1" > $HYST
+  fi
+}
+
+cur=$(cat $STATE 2>/dev/null)
+
+# best healthy transport by lowest biased latency
+best=""; bestscore=99999
+for t in $ORDER; do
+  is_healthy "$t" || continue
+  s=$(score "$t")
+  [ "$s" -lt "$bestscore" ] && { bestscore=$s; best=$t; }
+done
+
+if [ -z "$best" ]; then
+  logger -t norr-failover "NO healthy tunnel: $(tr '\n' ' ' < $METRICS)"
+  exit 0
+fi
+
+# no current, or current gone unhealthy -> jump to best immediately (fast escape)
+if [ -z "$cur" ] || ! is_healthy "$cur"; then
+  LPCT=${PCT[$best]}; LAVG=${AVG[$best]}; apply "$best"; rm -f $HYST; exit 0
+fi
+
+# udp is home: return to it when it is healthy and competitive (within MARGIN of the best)
+if [ "$cur" != udp ] && is_healthy udp && [ "$(( $(score udp) - bestscore ))" -le "$MARGIN" ]; then
+  promote udp; exit 0
+fi
+
+# otherwise switch to a clearly-faster path only if it beats current by MARGIN, sustained
+if [ "$best" != "$cur" ] && [ "$(( $(score "$cur") - bestscore ))" -ge "$MARGIN" ]; then
+  promote "$best"
+else
+  rm -f $HYST
+fi
+exit 0

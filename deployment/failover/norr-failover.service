@@ -1,0 +1,5 @@
+[Unit]
+Description=norr multi-transport failover router
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/norr-failover
