@@ -23,6 +23,20 @@ void Obfuscator::configure(const ObfuscationConfig& config,
                            const PresharedKey& preshared) noexcept {
   config_ = config;
   key_ = derive_obfuscation_key(preshared);
+
+  std::array<std::byte, sizeof(std::uint64_t)> seed{};
+  if (!random_bytes(seed)) seed = {};
+  nonce_counter_ = 0;
+  for (const auto byte : seed) {
+    nonce_counter_ = (nonce_counter_ << 8U) | static_cast<std::uint64_t>(byte);
+  }
+}
+
+void Obfuscator::next_nonce(std::span<std::byte> out) noexcept {
+  const auto value = nonce_counter_++;
+  for (std::size_t index = 0; index < kObfuscationNonceSize; ++index) {
+    out[index] = static_cast<std::byte>((value >> (8U * (7U - index))) & 0xFFU);
+  }
 }
 
 bool Obfuscator::mask(std::span<const std::byte> nonce,
@@ -45,7 +59,7 @@ std::expected<std::size_t, ObfuscationError> Obfuscator::wrap(
   if (config_.mode == ObfuscationMode::off) return std::unexpected(ObfuscationError::disabled);
 
   std::array<std::byte, kObfuscationNonceSize> nonce{};
-  if (!random_bytes(nonce)) return std::unexpected(ObfuscationError::invalid_nonce);
+  next_nonce(nonce);
 
   if (out.size() < kObfuscationNonceSize) return std::unexpected(ObfuscationError::buffer_too_small);
   std::copy(nonce.begin(), nonce.end(), out.begin());
@@ -133,10 +147,5 @@ std::expected<std::size_t, ObfuscationError> Obfuscator::generate_priming(
   if (out.size() < size) return std::unexpected(ObfuscationError::buffer_too_small);
   if (!random_bytes(out.first(size))) return std::unexpected(ObfuscationError::invalid_nonce);
   return size;
-}
-
-bool Obfuscator::is_priming(std::span<const std::byte> datagram) const noexcept {
-  static_cast<void>(datagram);
-  return false;
 }
 }

@@ -163,12 +163,17 @@ std::vector<std::byte> build_client_hello(std::string_view server_name) {
   return framed_handshake(0x01, body, 0x0301);
 }
 
-std::vector<std::byte> build_server_hello() {
+std::vector<std::byte> build_server_hello(std::span<const std::byte> session_id) {
   std::vector<std::byte> body;
   push_u16(body, 0x0303);
   push_random(body, kTlsRandomSize);
-  push_u8(body, static_cast<std::uint8_t>(kTlsSessionIdSize));
-  push_random(body, kTlsSessionIdSize);
+  if (session_id.size() >= 1 && session_id.size() <= 32) {
+    push_u8(body, static_cast<std::uint8_t>(session_id.size()));
+    push_bytes(body, session_id);
+  } else {
+    push_u8(body, static_cast<std::uint8_t>(kTlsSessionIdSize));
+    push_random(body, kTlsSessionIdSize);
+  }
   push_u16(body, 0x1301);
   push_u8(body, 0);
 
@@ -253,7 +258,15 @@ std::expected<std::span<const std::byte>, CamouflageError> CamouflageFramer::nex
 
     if (record->type == TlsRecordType::handshake) {
       if (role_ == Role::server && !sent_reply_ && looks_like_client_hello(view)) {
-        pending_reply_ = build_server_hello();
+        std::span<const std::byte> session_id{};
+        constexpr std::size_t kSessionIdLenOffset = kTlsRecordHeaderSize + 4 + 2 + kTlsRandomSize;
+        if (view.size() > kSessionIdLenOffset) {
+          const auto sid_len = static_cast<std::size_t>(view[kSessionIdLenOffset]);
+          if (sid_len <= 32 && view.size() >= kSessionIdLenOffset + 1 + sid_len) {
+            session_id = view.subspan(kSessionIdLenOffset + 1, sid_len);
+          }
+        }
+        pending_reply_ = build_server_hello(session_id);
         const auto ccs = build_change_cipher_spec();
         pending_reply_.insert(pending_reply_.end(), ccs.begin(), ccs.end());
         sent_reply_ = true;

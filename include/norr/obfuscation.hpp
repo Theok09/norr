@@ -102,13 +102,14 @@ class Obfuscator {
   [[nodiscard]] std::expected<std::size_t, ObfuscationError> generate_priming(
       std::span<std::byte> out) noexcept;
 
-  [[nodiscard]] bool is_priming(std::span<const std::byte> datagram) const noexcept;
-
  private:
   [[nodiscard]] bool mask(std::span<const std::byte> nonce,
                           std::span<std::byte> region) const noexcept;
 
+  void next_nonce(std::span<std::byte> out) noexcept;
+
   ObfuscationConfig config_{};
   ObfuscationKey key_{};
+  std::uint64_t nonce_counter_{};
 };
 }

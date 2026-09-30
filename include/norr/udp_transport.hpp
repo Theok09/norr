@@ -71,6 +71,7 @@ struct OffloadCapabilities {
 struct OutboundDatagram {
   Endpoint destination;
   std::span<const std::byte> payload;
+  std::uint32_t flow{};
 };
 
 struct InboundDatagram {

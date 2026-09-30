@@ -239,6 +239,7 @@ class Worker {
   struct TransmitJob {
     std::shared_ptr<Session> session;
     std::uint64_t counter{};
+    std::uint32_t flow{};
     std::size_t length{};
     Endpoint destination{};
     std::size_t sealed{};

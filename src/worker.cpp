@@ -2,6 +2,8 @@
 // Licensed under the GNU AGPL v3 or later. See LICENSE.
 #include "norr/worker.hpp"
 
+#include "norr/flow_hash.hpp"
+
 #include <algorithm>
 
 namespace norr {
@@ -61,20 +63,20 @@ std::size_t Worker::flush_transmit() {
     const auto slot = std::span<std::byte>{transmit_slots_[index]};
     const auto sealed = slot.subspan(kFecHeaderSize, job.sealed);
     if (job.fec == kNoFec || !fec_peers_[job.fec].encoder.active()) {
-      transmit_batch_.push_back(OutboundDatagram{.destination = job.destination, .payload = sealed});
+      transmit_batch_.push_back(OutboundDatagram{.destination = job.destination, .payload = sealed, .flow = job.flow});
       continue;
     }
     auto& entry = fec_peers_[job.fec];
     static_cast<void>(serialize_fec_header(entry.encoder.next_header(job.sealed), slot));
     transmit_batch_.push_back(OutboundDatagram{
-        .destination = job.destination, .payload = slot.first(kFecHeaderSize + job.sealed)});
+        .destination = job.destination, .payload = slot.first(kFecHeaderSize + job.sealed), .flow = job.flow});
     entry.destination = job.destination;
     entry.last_symbol = now;
     for (const auto& symbol : entry.encoder.add(sealed)) {
       if (parity_used == parity_slots_.size()) parity_slots_.emplace_back();
       auto& copy = parity_slots_[parity_used++];
       copy.assign(symbol.begin(), symbol.end());
-      transmit_batch_.push_back(OutboundDatagram{.destination = job.destination, .payload = copy});
+      transmit_batch_.push_back(OutboundDatagram{.destination = job.destination, .payload = copy, .flow = job.flow});
     }
   }
   transmit_jobs_.clear();
@@ -113,6 +115,7 @@ DropReason Worker::route_from_tun(std::span<const std::byte> frame, bool batch) 
     stats_.record_drop(DropReason::malformed_inner_packet);
     return DropReason::malformed_inner_packet;
   }
+  const auto flow = static_cast<std::uint32_t>(hash_flow(flow_key_of(*parsed, frame)));
 
   const auto decision = routes_->classify(*parsed, kNoPeer);
   if (!decision) {
@@ -179,6 +182,7 @@ DropReason Worker::route_from_tun(std::span<const std::byte> frame, bool batch) 
               plain.begin() + static_cast<std::ptrdiff_t>(padded), std::byte{0});
     transmit_jobs_.push_back(TransmitJob{.session = std::move(session),
                                          .counter = *counter,
+                                         .flow = flow,
                                          .length = padded,
                                          .destination = destination,
                                          .sealed = 0,
@@ -215,9 +219,9 @@ DropReason Worker::route_from_tun(std::span<const std::byte> frame, bool batch) 
       const auto parity = fec_state.encoder.add(wire);
       if (!parity.empty()) {
         fec_batch_.clear();
-        fec_batch_.push_back(OutboundDatagram{.destination = fec_state.destination, .payload = framed});
+        fec_batch_.push_back(OutboundDatagram{.destination = fec_state.destination, .payload = framed, .flow = flow});
         for (const auto& symbol : parity) {
-          fec_batch_.push_back(OutboundDatagram{.destination = fec_state.destination, .payload = symbol});
+          fec_batch_.push_back(OutboundDatagram{.destination = fec_state.destination, .payload = symbol, .flow = flow});
         }
         if (send_all(fec_batch_) == 0) {
           bytes_dropped_ += framed.size();

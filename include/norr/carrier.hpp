@@ -180,7 +180,6 @@ class TcpCarrier final : public Carrier {
   std::size_t target_{1};
   std::vector<TcpTransport> extra_;
   std::vector<bool> extra_started_;
-  std::size_t rr_{0};
 };
 
 class QuicCarrier final : public Carrier {

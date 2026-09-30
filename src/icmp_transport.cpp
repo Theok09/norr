@@ -140,7 +140,7 @@ std::expected<std::size_t, TransportError> IcmpTransport::send_batch(
   std::size_t sent = 0;
   for (const auto& datagram : datagrams) {
     scratch_.assign(kIcmpHeaderSize + datagram.payload.size(), std::byte{0});
-    const auto framed = build_icmp_echo(type, kNorrIcmpId, sequence_++, datagram.payload, scratch_);
+    const auto framed = build_icmp_echo(type, identifier_, sequence_++, datagram.payload, scratch_);
     if (framed == 0) {
       ++stats_.tx_errors;
       continue;
@@ -195,7 +195,7 @@ std::expected<std::size_t, TransportError> IcmpTransport::receive_batch(
       ++stats_.rx_errors;
       continue;
     }
-    if (view->type != want || view->identifier != kNorrIcmpId) continue;
+    if (view->type != want || view->identifier != identifier_) continue;
 
     std::array<std::byte, 4> ipv4{};
     std::memcpy(ipv4.data(), &from.sin_addr.s_addr, 4);

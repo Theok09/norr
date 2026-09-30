@@ -55,7 +55,8 @@ struct TlsRecordView {
 
 [[nodiscard]] std::vector<std::byte> build_client_hello(std::string_view server_name);
 
-[[nodiscard]] std::vector<std::byte> build_server_hello();
+[[nodiscard]] std::vector<std::byte> build_server_hello(
+    std::span<const std::byte> session_id = {});
 
 [[nodiscard]] std::vector<std::byte> build_change_cipher_spec();
 

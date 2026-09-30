@@ -18,6 +18,7 @@
 #include <thread>
 
 #include "norr/address.hpp"
+#include "norr/blake2s.hpp"
 #include "norr/handshake.hpp"
 #include "norr/handshake_frame.hpp"
 #include "norr/packet.hpp"
@@ -308,6 +309,15 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
                                         std::string{transport_error_message(ok.error())}});
     }
     if (fwmark_ != 0) static_cast<void>(icmp_transport_.set_mark(fwmark_));
+    {
+      const auto domain = std::as_bytes(std::span{std::string_view{"norr-icmp-id-v1"}});
+      const auto digest = Blake2s::hash(domain, partner->preshared);
+      auto id = static_cast<std::uint16_t>(
+          (static_cast<unsigned>(static_cast<std::uint8_t>(digest[0])) << 8U) |
+          static_cast<unsigned>(static_cast<std::uint8_t>(digest[1])));
+      if (id == 0) id = 1;
+      icmp_transport_.set_identifier(id);
+    }
     const auto far = partner->endpoint.has_value() ? *partner->endpoint : *bind_address;
     icmp_carrier_ = std::make_unique<IcmpCarrier>(icmp_transport_, far);
     if (config.obfuscation.mode != ObfuscationMode::off) {

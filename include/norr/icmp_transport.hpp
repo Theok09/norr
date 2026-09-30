@@ -56,6 +56,8 @@ class IcmpTransport {
   [[nodiscard]] bool started() const noexcept { return socket_.valid(); }
 
   [[nodiscard]] std::expected<void, TransportError> set_mark(std::uint32_t mark);
+
+  void set_identifier(std::uint16_t identifier) noexcept { identifier_ = identifier; }
   [[nodiscard]] int descriptor() const noexcept { return socket_.get(); }
 
   [[nodiscard]] std::expected<std::size_t, TransportError> send_batch(
@@ -69,6 +71,7 @@ class IcmpTransport {
  private:
   FileDescriptor socket_;
   [[maybe_unused]] Role role_{Role::client};
+  [[maybe_unused]] std::uint16_t identifier_{kNorrIcmpId};
   [[maybe_unused]] std::uint16_t sequence_{};
   TransportStats stats_{};
   [[maybe_unused]] std::vector<std::byte> scratch_;
