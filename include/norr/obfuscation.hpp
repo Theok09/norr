@@ -8,6 +8,7 @@
 #include <expected>
 #include <span>
 #include <string_view>
+#include <vector>
 
 #include "norr/blake2s.hpp"
 #include "norr/crypto.hpp"
@@ -111,5 +112,6 @@ class Obfuscator {
   ObfuscationConfig config_{};
   ObfuscationKey key_{};
   std::uint64_t nonce_counter_{};
+  std::vector<std::byte> unwrap_scratch_{};
 };
 }

@@ -199,6 +199,16 @@ void TcpCarrier::poll(Instant now) {
     drive(extra_[index], started, dialing_);
     extra_started_[index] = started;
   }
+
+  if (!dialing_) {
+    for (std::size_t index = extra_.size(); index-- > 0;) {
+      const auto state = extra_[index].state();
+      if (state == TcpState::closed || state == TcpState::failed) {
+        extra_.erase(extra_.begin() + static_cast<std::ptrdiff_t>(index));
+        extra_started_.erase(extra_started_.begin() + static_cast<std::ptrdiff_t>(index));
+      }
+    }
+  }
 }
 
 std::expected<std::size_t, TransportError> TcpCarrier::send_batch(

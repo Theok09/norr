@@ -121,7 +121,8 @@ std::expected<std::size_t, ObfuscationError> Obfuscator::unwrap(
 
   if (region.empty()) return std::unexpected(ObfuscationError::malformed);
 
-  std::vector<std::byte> plain(region.begin(), region.end());
+  unwrap_scratch_.assign(region.begin(), region.end());
+  auto& plain = unwrap_scratch_;
   if (!mask(nonce, plain)) return std::unexpected(ObfuscationError::decryption_failed);
 
   const auto junk_length = static_cast<std::size_t>(plain[0]);

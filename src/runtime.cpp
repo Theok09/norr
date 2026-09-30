@@ -670,11 +670,14 @@ void Runtime::service_tcp_carrier(Instant now) {
       tcp_.set_mark(fwmark_);
       tcp_accepted_at_ = now;
     }
-  } else if (tcp_listener_.listening() && tcp_carrier != nullptr && tcp_carrier->wants_more()) {
+  }
+
+  while (tcp_listener_.listening() && tcp_carrier != nullptr) {
     auto incoming = tcp_listener_.accept();
-    if (incoming && incoming->has_value()) {
-      auto conn = std::move(**incoming);
-      conn.set_mark(fwmark_);
+    if (!incoming || !incoming->has_value()) break;
+    auto conn = std::move(**incoming);
+    conn.set_mark(fwmark_);
+    if (tcp_carrier->wants_more()) {
       tcp_carrier->adopt(std::move(conn));
     }
   }
@@ -920,7 +923,11 @@ void Runtime::wait_for_work(Instant now) {
       if (descriptor != tcp_.descriptor()) watch(descriptor);
     });
   }
-  if (tcp_listener_.listening()) watch(tcp_listener_.descriptor());
+  if (tcp_listener_.listening()) {
+    auto* tcp_carrier = dynamic_cast<TcpCarrier*>(carrier_);
+    const bool want = !tcp_.connected() || (tcp_carrier != nullptr && tcp_carrier->wants_more());
+    if (want) watch(tcp_listener_.descriptor());
+  }
   if (metrics_.listening()) watch(metrics_.descriptor());
 
   auto timeout = std::chrono::milliseconds{50};
