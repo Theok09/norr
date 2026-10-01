@@ -1,0 +1,119 @@
+#!/bin/bash
+# norr-doctor — one-shot health + anti-spoof diagnostic for a Norr node.
+# Run on a Norr server (root). Checks services, resource health, every
+# transport's reachability/latency, and inspects the wire for the cleartext
+# spoof leaks that must stay fixed. Prints PASS/WARN/FAIL with a summary.
+
+PASS=0; WARN=0; FAIL=0
+ok()   { printf '  \033[32mPASS\033[0m %s\n' "$*"; PASS=$((PASS+1)); }
+warn() { printf '  \033[33mWARN\033[0m %s\n' "$*"; WARN=$((WARN+1)); }
+bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); }
+hdr()  { printf '\n=== %s ===\n' "$*"; }
+
+NDPARSE=/tmp/norr_doctor_parse.py
+cat > "$NDPARSE" <<'PYEOF'
+import sys,re
+name=sys.argv[1]; off=int(sys.argv[2])
+pkts=[]; cur=""
+for line in sys.stdin:
+    if re.match(r"\d\d:\d\d:\d\d", line) or " IP " in line:
+        if cur: pkts.append(cur); cur=""
+        continue
+    m=re.search(r"0x[0-9a-f]+:\s*(.*)", line)
+    if m: cur+=re.sub(r"[^0-9a-f]", "", m.group(1).lower())
+if cur: pkts.append(cur)
+sigs=[p[off*2:(off+6)*2] for p in pkts if len(p)>=(off+6)*2]
+if len(sigs)<2: print(f"  WARN {name}: too few samples ({len(sigs)})"); sys.exit()
+uniq=len(set(sigs))
+if uniq==1: print(f"  FAIL {name}: fixed prefix {sigs[0]} across {len(sigs)} pkts (SPOOF LEAK)")
+else: print(f"  PASS {name}: obf prefix varies ({uniq}/{len(sigs)} distinct)")
+PYEOF
+
+
+declare -A TUN=( [udp]=norr2 [camo]=norr3 [icmp]=norr4 [tcp-tls]=norr1 )
+declare -A PEERIP=( [udp]=10.111.0.1 [camo]=10.121.0.1 [icmp]=10.141.0.1 [tcp-tls]=10.100.0.1 )
+declare -A PORT=( [udp]=40201 [camo]=40443 [icmp]=9 [tcp-tls]=40200 )
+
+hdr "services"
+for s in norr1 norr2 norr3 norr4; do
+  st=$(systemctl is-active norr@$s 2>/dev/null)
+  nr=$(systemctl show norr@$s -p NRestarts --value 2>/dev/null)
+  if [ "$st" = active ]; then
+    [ "${nr:-0}" -gt 3 ] && warn "norr@$s active but $nr restarts" || ok "norr@$s active (restarts=$nr)"
+  else bad "norr@$s is $st"; fi
+done
+
+hdr "cpu (busy-spin regression)"
+while read -r pcpu args; do
+  name=$(echo "$args" | grep -oE 'norr[1-4]')
+  if awk "BEGIN{exit !($pcpu>40)}"; then bad "$name CPU ${pcpu}% (possible busy-spin)"; \
+  elif awk "BEGIN{exit !($pcpu>15)}"; then warn "$name CPU ${pcpu}%"; \
+  else ok "$name CPU ${pcpu}%"; fi
+done < <(ps -eo pcpu,args --sort=-pcpu | grep norrd | grep -v grep | head -4)
+
+hdr "tcp listen backlog (must be 0)"
+for t in tcp-tls camo; do
+  p=${PORT[$t]}
+  rq=$(ss -tlnH "( sport = :$p )" 2>/dev/null | awk '{print $2}' | head -1)
+  [ -z "$rq" ] && { ok "$t ($p) not listening here (client side)"; continue; }
+  [ "$rq" -eq 0 ] && ok "$t ($p) backlog 0" || bad "$t ($p) backlog $rq (accept not draining)"
+done
+
+hdr "fd / memory (leak check)"
+for s in norr1 norr2 norr3 norr4; do
+  pid=$(pgrep -f "norr/$s.toml" | head -1); [ -z "$pid" ] && continue
+  fds=$(ls /proc/$pid/fd 2>/dev/null | wc -l)
+  rss=$(ps -o rss= -p "$pid" | tr -d ' '); rssm=$((rss/1024))
+  [ "$fds" -gt 200 ] && bad "$s fds=$fds (leak?)" || ok "$s fds=$fds rss=${rssm}MB"
+done
+
+hdr "transport reachability + latency (to peer 2053)"
+for t in udp camo icmp; do
+  ip=${PEERIP[$t]}; ok_n=0; sum=0
+  for i in 1 2 3 4 5; do
+    t0=$(date +%s%N)
+    if timeout 2 bash -c "echo >/dev/tcp/$ip/2053" 2>/dev/null; then
+      t1=$(date +%s%N); ok_n=$((ok_n+1)); sum=$((sum+(t1-t0)/1000000)); fi
+  done
+  if [ $ok_n -eq 0 ]; then warn "$t ($ip:2053) unreachable now"; \
+  else avg=$((sum/ok_n)); loss=$(((5-ok_n)*20))
+    [ $loss -gt 40 ] && warn "$t loss=${loss}% rtt=${avg}ms" || ok "$t loss=${loss}% rtt=${avg}ms"; fi
+done
+
+hdr "failover controller"
+act=$(cat /run/norr-failover.active 2>/dev/null)
+[ -n "$act" ] && ok "failover active=$act" || warn "no failover state file"
+[ -f /run/norr-failover.metrics ] && sed 's/^/    /' /run/norr-failover.metrics
+
+hdr "ANTI-SPOOF wire inspection (3 leak regression)"
+iface=any
+peer_ep() {  # echo "pubip proto pubport" read from a config endpoint=
+  local cfg=$1 proto=$2
+  local ep; ep=$(grep -E '^endpoint' /etc/norr/$cfg 2>/dev/null | head -1 | sed 's/.*=\s*"\?//; s/"\?\s*$//')
+  local ip=${ep%:*} port=${ep##*:}
+  echo "$ip $proto $port"
+}
+check_wire() {
+  local name=$1 tun=$2 proto=$3 pubip=$4 pubport=$5 off=$6
+  [ -z "$pubip" ] || [ -z "$pubport" ] && { warn "$name: no endpoint in config"; return; }
+  ( for i in $(seq 1 30); do timeout 1 ping -c1 -s 120 -W1 "$tun" >/dev/null 2>&1; done ) &
+  local gen=$!
+  local filt="$proto and host $pubip and port $pubport"
+  [ "$proto" = icmp ] && filt="icmp and host $pubip"
+  local cap; cap=$(timeout 7 tcpdump -i "$iface" -n -c 8 -xx "$filt" 2>/dev/null)
+  kill $gen 2>/dev/null; wait 2>/dev/null
+  [ -z "$cap" ] && { warn "$name: no packets captured (idle/filter)"; return; }
+  printf "%s\n" "$cap" | python3 "$NDPARSE" "$name" "$off"
+}
+read u_ip u_pr u_pt < <(peer_ep norr2.toml udp)
+read c_ip c_pr c_pt < <(peer_ep norr3.toml tcp)
+read i_ip i_pr i_pt < <(peer_ep norr4.toml icmp)
+check_wire "udp-obf" "${PEERIP[udp]}"  udp  "$u_ip" "$u_pt" 48
+check_wire "camo"    "${PEERIP[camo]}" tcp  "$c_ip" "$c_pt" 80
+check_wire "icmp"    "${PEERIP[icmp]}" icmp "$i_ip" "$i_pt" 48
+
+hdr "summary"
+printf '  PASS=%d  WARN=%d  FAIL=%d\n' "$PASS" "$WARN" "$FAIL"
+[ "$FAIL" -gt 0 ] && exit 2
+[ "$WARN" -gt 0 ] && exit 1
+exit 0
