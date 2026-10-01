@@ -358,9 +358,11 @@ std::expected<std::span<const std::byte>, CamouflageError> CamouflageFramer::nex
             fallback_prelude_.assign(raw.begin(), raw.end());
           }
         }
-        pending_reply_ = build_server_hello(session_id);
-        const auto ccs = build_change_cipher_spec();
-        pending_reply_.insert(pending_reply_.end(), ccs.begin(), ccs.end());
+        if (!reality_rejected_) {
+          pending_reply_ = build_server_hello(session_id);
+          const auto ccs = build_change_cipher_spec();
+          pending_reply_.insert(pending_reply_.end(), ccs.begin(), ccs.end());
+        }
         sent_reply_ = true;
       }
       handshake_done_ = true;
