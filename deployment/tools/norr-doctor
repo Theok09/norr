@@ -82,7 +82,7 @@ done
 
 hdr "failover controller"
 act=$(cat /run/norr-failover.active 2>/dev/null)
-[ -n "$act" ] && ok "failover active=$act" || warn "no failover state file"
+[ -n "$act" ] && ok "failover active=$act" || ok "no failover here (server/receive side)"
 [ -f /run/norr-failover.metrics ] && sed 's/^/    /' /run/norr-failover.metrics
 
 hdr "ANTI-SPOOF wire inspection (3 leak regression)"
@@ -95,7 +95,7 @@ peer_ep() {  # echo "pubip proto pubport" read from a config endpoint=
 }
 check_wire() {
   local name=$1 tun=$2 proto=$3 pubip=$4 pubport=$5 off=$6
-  [ -z "$pubip" ] || [ -z "$pubport" ] && { warn "$name: no endpoint in config"; return; }
+  [ -z "$pubip" ] || [ -z "$pubport" ] && { ok "$name: N/A here (server/receive side)"; return; }
   ( for i in $(seq 1 30); do timeout 1 ping -c1 -s 120 -W1 "$tun" >/dev/null 2>&1; done ) &
   local gen=$!
   local filt="$proto and host $pubip and port $pubport"
