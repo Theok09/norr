@@ -331,8 +331,20 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       else if (value == "fake-tls") config.camouflage = CamouflageMode::fake_tls;
       else return fail(ConfigError::invalid_value);
     } else if (qualified == "transport.sni") {
-      if (value.empty() || value.size() > 253) return fail(ConfigError::invalid_value);
-      config.camouflage_sni = std::string{value};
+      if (value.empty() || value.size() > 2048) return fail(ConfigError::invalid_value);
+      config.camouflage_sni_pool.clear();
+      std::string_view rest{value};
+      while (!rest.empty()) {
+        auto comma = rest.find(',');
+        auto item = rest.substr(0, comma);
+        while (!item.empty() && (item.front() == ' ' || item.front() == '\t')) item.remove_prefix(1);
+        while (!item.empty() && (item.back() == ' ' || item.back() == '\t')) item.remove_suffix(1);
+        if (!item.empty() && item.size() <= 253) config.camouflage_sni_pool.emplace_back(item);
+        if (comma == std::string_view::npos) break;
+        rest.remove_prefix(comma + 1);
+      }
+      if (config.camouflage_sni_pool.empty()) return fail(ConfigError::invalid_value);
+      config.camouflage_sni = config.camouflage_sni_pool.front();
     } else if (qualified == "transport.reality_private_key") {
       if (!is_hex_key(value)) return fail(ConfigError::invalid_value);
       config.reality_private_key = std::string{value};

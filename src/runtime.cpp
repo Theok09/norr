@@ -317,9 +317,14 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
             : config.tcp_connections);
     if (camouflaged) {
       tcp_carrier_->set_camouflage(config.camouflage_sni);
+      if (!config.camouflage_sni_pool.empty()) {
+        tcp_carrier_->set_sni_pool(config.camouflage_sni_pool);
+      }
       auto camo_obfuscation = config.obfuscation;
       if (camo_obfuscation.mode == ObfuscationMode::off) {
-        camo_obfuscation.mode = ObfuscationMode::header_mask;
+        camo_obfuscation.mode = ObfuscationMode::full;
+        camo_obfuscation.junk_padding = true;
+        if (camo_obfuscation.junk_max == 0) camo_obfuscation.junk_max = 96;
       }
       tcp_carrier_->configure_obfuscation(camo_obfuscation, partner->preshared);
       if (config.role == NodeRole::server && !config.reality_private_key.empty()) {
@@ -446,9 +451,14 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
             : config.tcp_connections);
       if (camouflaged) {
       tcp_carrier_->set_camouflage(config.camouflage_sni);
+      if (!config.camouflage_sni_pool.empty()) {
+        tcp_carrier_->set_sni_pool(config.camouflage_sni_pool);
+      }
       auto camo_obfuscation = config.obfuscation;
       if (camo_obfuscation.mode == ObfuscationMode::off) {
-        camo_obfuscation.mode = ObfuscationMode::header_mask;
+        camo_obfuscation.mode = ObfuscationMode::full;
+        camo_obfuscation.junk_padding = true;
+        if (camo_obfuscation.junk_max == 0) camo_obfuscation.junk_max = 96;
       }
       tcp_carrier_->configure_obfuscation(camo_obfuscation, partner->preshared);
       if (config.role == NodeRole::server && !config.reality_private_key.empty()) {

@@ -97,6 +97,7 @@ struct Config {
   std::uint8_t tcp_connections{1};
   CamouflageMode camouflage{CamouflageMode::off};
   std::string camouflage_sni{"www.microsoft.com"};
+  std::vector<std::string> camouflage_sni_pool;
   std::string reality_private_key;
   std::string reality_public_key;
   std::string reality_short_id;

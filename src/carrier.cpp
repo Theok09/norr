@@ -133,6 +133,10 @@ std::expected<std::size_t, TransportError> IcmpCarrier::receive_batch(
 void TcpCarrier::drive(TcpTransport& transport, bool& tls_started, bool dialing) {
   if (dialing && transport.state() == TcpState::closed) {
     tls_started = false;
+    if (!sni_pool_.empty()) {
+      sni_ = sni_pool_[sni_index_ % sni_pool_.size()];
+      ++sni_index_;
+    }
     static_cast<void>(transport.connect(peer_));
     return;
   }

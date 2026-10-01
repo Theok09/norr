@@ -143,6 +143,12 @@ class TcpCarrier final : public Carrier {
     sni_ = std::move(server_name);
   }
 
+  void set_sni_pool(std::vector<std::string> pool) {
+    if (pool.empty()) return;
+    sni_pool_ = std::move(pool);
+    sni_ = sni_pool_.front();
+  }
+
   void configure_obfuscation(const ObfuscationConfig& config,
                              const PresharedKey& preshared) {
     obfuscator_.configure(config, preshared);
@@ -193,6 +199,8 @@ class TcpCarrier final : public Carrier {
   bool tls_started_{};
   bool camouflage_{};
   std::string sni_{};
+  std::vector<std::string> sni_pool_{};
+  std::size_t sni_index_{};
   PresharedKey preshared_{};
   Obfuscator obfuscator_{};
   std::vector<std::byte> wrap_scratch_;
