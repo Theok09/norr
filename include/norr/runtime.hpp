@@ -169,6 +169,14 @@ class Runtime {
   std::vector<FallbackProxy> fallbacks_;
   void service_fallbacks();
 
+  bool reality_server_{};
+  PrivateKey reality_server_priv_{};
+  std::uint64_t reality_window_{120};
+  std::string reality_sni_{};
+  std::vector<TcpTransport> pending_;
+  std::vector<Instant> pending_since_;
+  void drive_pending(Instant now);
+
   IcmpTransport icmp_transport_;
   std::unique_ptr<UdpCarrier> udp_carrier_;
   std::unique_ptr<IcmpCarrier> icmp_carrier_;

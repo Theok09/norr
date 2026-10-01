@@ -326,6 +326,10 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
         PrivateKey reality_priv{};
         if (decode_hex(config.reality_private_key, reality_priv)) {
           tcp_carrier_->set_reality_server(reality_priv, 120);
+          reality_server_ = true;
+          reality_server_priv_ = reality_priv;
+          reality_window_ = 120;
+          reality_sni_ = config.camouflage_sni;
           if (!config.reality_cover.empty()) {
             if (auto cover = resolve_cover(config.reality_cover); cover.has_value()) {
               reality_cover_ = *cover;
@@ -451,6 +455,10 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
         PrivateKey reality_priv{};
         if (decode_hex(config.reality_private_key, reality_priv)) {
           tcp_carrier_->set_reality_server(reality_priv, 120);
+          reality_server_ = true;
+          reality_server_priv_ = reality_priv;
+          reality_window_ = 120;
+          reality_sni_ = config.camouflage_sni;
           if (!config.reality_cover.empty()) {
             if (auto cover = resolve_cover(config.reality_cover); cover.has_value()) {
               reality_cover_ = *cover;
@@ -780,10 +788,17 @@ void Runtime::service_tcp_carrier(Instant now) {
     if (!incoming || !incoming->has_value()) break;
     auto conn = std::move(**incoming);
     conn.set_mark(fwmark_);
-    if (tcp_carrier->wants_more()) {
+    if (reality_server_) {
+      if (pending_.size() < 16) {
+        pending_.push_back(std::move(conn));
+        pending_since_.push_back(now);
+      }
+    } else if (tcp_carrier->wants_more()) {
       tcp_carrier->adopt(std::move(conn));
     }
   }
+
+  if (reality_server_) drive_pending(now);
 
   if (tcp_listener_.listening() && tcp_.connected() && tcp_accepted_at_ != Instant{} &&
       now - tcp_accepted_at_ > std::chrono::seconds{15}) {
@@ -829,6 +844,45 @@ void Runtime::service_tcp_carrier(Instant now) {
 void Runtime::service_fallbacks() {
   for (auto& proxy : fallbacks_) proxy.pump();
   std::erase_if(fallbacks_, [](const FallbackProxy& p) { return !p.active(); });
+}
+
+void Runtime::drive_pending(Instant now) {
+  std::array<std::span<const std::byte>, 8> frames{};
+  for (std::size_t i = 0; i < pending_.size();) {
+    auto& conn = pending_[i];
+    if (!conn.camouflage_enabled() && conn.state() == TcpState::connected) {
+      conn.set_reality_server(reality_server_priv_, reality_window_);
+      static_cast<void>(conn.enable_camouflage(CamouflageFramer::Role::server, reality_sni_));
+    }
+    if (conn.connected()) static_cast<void>(conn.receive_frames(frames));
+
+    bool drop = false;
+    if (conn.reality_rejected()) {
+      if (reality_cover_valid_) {
+        auto prelude = conn.take_fallback_prelude();
+        auto client = conn.release_socket();
+        if (client.valid()) {
+          FallbackProxy proxy;
+          if (proxy.start(std::move(client), reality_cover_, prelude)) {
+            fallbacks_.push_back(std::move(proxy));
+          }
+        }
+      }
+      drop = true;
+    } else if (conn.reality_authenticated()) {
+      drop = true;
+    } else if (!conn.connected() ||
+               now - pending_since_[i] > std::chrono::seconds{10}) {
+      drop = true;
+    }
+
+    if (drop) {
+      pending_.erase(pending_.begin() + static_cast<std::ptrdiff_t>(i));
+      pending_since_.erase(pending_since_.begin() + static_cast<std::ptrdiff_t>(i));
+    } else {
+      ++i;
+    }
+  }
 }
 
 void Runtime::service_quic_carrier() {
@@ -1044,6 +1098,9 @@ void Runtime::wait_for_work(Instant now) {
     tcp_carrier->for_each_descriptor([&](int descriptor) {
       if (descriptor != tcp_.descriptor()) watch(descriptor);
     });
+  }
+  for (const auto& conn : pending_) {
+    if (conn.connected()) watch(conn.descriptor());
   }
   for (const auto& proxy : fallbacks_) {
     if (!proxy.active()) continue;
