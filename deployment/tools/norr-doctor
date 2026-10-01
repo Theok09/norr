@@ -103,7 +103,13 @@ check_wire() {
   local cap; cap=$(timeout 7 tcpdump -i "$iface" -n -c 8 -xx "$filt" 2>/dev/null)
   kill $gen 2>/dev/null; wait 2>/dev/null
   [ -z "$cap" ] && { warn "$name: no packets captured (idle/filter)"; return; }
-  printf "%s\n" "$cap" | python3 "$NDPARSE" "$name" "$off"
+  local verdict; verdict=$(printf "%s\n" "$cap" | python3 "$NDPARSE" "$name" "$off")
+  echo "$verdict"
+  case "$verdict" in
+    *FAIL*) FAIL=$((FAIL+1));;
+    *WARN*) WARN=$((WARN+1));;
+    *PASS*) PASS=$((PASS+1));;
+  esac
 }
 read u_ip u_pr u_pt < <(peer_ep norr2.toml udp)
 read c_ip c_pr c_pt < <(peer_ep norr3.toml tcp)
