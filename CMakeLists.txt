@@ -57,6 +57,7 @@ add_library(norr_core
     src/notify.cpp
     src/noise.cpp
     src/obfuscation.cpp
+    src/reality.cpp
     src/offload.cpp
     src/parallel.cpp
     src/nonce.cpp
@@ -233,6 +234,9 @@ if(NORR_BUILD_TESTS)
     add_executable(norr_obfuscation_tests tests/obfuscation_test.cpp)
     target_link_libraries(norr_obfuscation_tests PRIVATE norr_core tests_support)
     add_test(NAME norr_obfuscation_tests COMMAND norr_obfuscation_tests)
+    add_executable(norr_reality_tests tests/reality_test.cpp)
+    target_link_libraries(norr_reality_tests PRIVATE norr_core tests_support)
+    add_test(NAME norr_reality_tests COMMAND norr_reality_tests)
     add_executable(norr_icmp_tests tests/icmp_test.cpp)
     target_link_libraries(norr_icmp_tests PRIVATE norr_core tests_support)
     add_test(NAME norr_icmp_tests COMMAND norr_icmp_tests)
