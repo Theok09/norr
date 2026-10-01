@@ -131,13 +131,21 @@ class TcpCarrier final : public Carrier {
 
   [[nodiscard]] const TransportStats& stats() const noexcept override { return stats_; }
 
-  [[nodiscard]] std::size_t max_payload() const noexcept override { return kMaximumTcpFrame; }
+  [[nodiscard]] std::size_t max_payload() const noexcept override {
+    const auto overhead = obfuscator_.max_overhead();
+    return overhead < kMaximumTcpFrame ? kMaximumTcpFrame - overhead : kMaximumTcpFrame;
+  }
 
   void poll(Instant now);
 
   void set_camouflage(std::string server_name) {
     camouflage_ = true;
     sni_ = std::move(server_name);
+  }
+
+  void configure_obfuscation(const ObfuscationConfig& config,
+                             const PresharedKey& preshared) {
+    obfuscator_.configure(config, preshared);
   }
 
   [[nodiscard]] bool ready() const noexcept {
@@ -175,6 +183,9 @@ class TcpCarrier final : public Carrier {
   bool camouflage_{};
   std::string sni_{};
   PresharedKey preshared_{};
+  Obfuscator obfuscator_{};
+  std::vector<std::byte> wrap_scratch_;
+  std::vector<std::vector<std::byte>> unwrap_slots_;
   std::vector<std::span<const std::byte>> inbox_;
   TransportStats stats_{};
   std::size_t target_{1};

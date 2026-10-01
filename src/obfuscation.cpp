@@ -33,6 +33,7 @@ void Obfuscator::configure(const ObfuscationConfig& config,
 }
 
 void Obfuscator::next_nonce(std::span<std::byte> out) noexcept {
+  if (random_bytes(out.first(kObfuscationNonceSize))) return;
   const auto value = nonce_counter_++;
   for (std::size_t index = 0; index < kObfuscationNonceSize; ++index) {
     out[index] = static_cast<std::byte>((value >> (8U * (7U - index))) & 0xFFU);

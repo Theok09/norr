@@ -269,7 +269,14 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
 
     tcp_carrier_ = std::make_unique<TcpCarrier>(tcp_, far, dialing, partner->preshared);
     tcp_carrier_->set_connections(config.tcp_connections);
-    if (camouflaged) tcp_carrier_->set_camouflage(config.camouflage_sni);
+    if (camouflaged) {
+      tcp_carrier_->set_camouflage(config.camouflage_sni);
+      auto camo_obfuscation = config.obfuscation;
+      if (camo_obfuscation.mode == ObfuscationMode::off) {
+        camo_obfuscation.mode = ObfuscationMode::header_mask;
+      }
+      tcp_carrier_->configure_obfuscation(camo_obfuscation, partner->preshared);
+    }
     carrier_ = tcp_carrier_.get();
     active_kind_ = TransportKind::tcp_tls;
   } else if (config.transport == TransportMode::icmp) {
@@ -320,10 +327,12 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
     }
     const auto far = partner->endpoint.has_value() ? *partner->endpoint : *bind_address;
     icmp_carrier_ = std::make_unique<IcmpCarrier>(icmp_transport_, far);
-    if (config.obfuscation.mode != ObfuscationMode::off) {
-      icmp_carrier_->configure_obfuscation(config.obfuscation, partner->preshared);
-      if (config.role == NodeRole::client) icmp_carrier_->prime();
+    auto icmp_obfuscation = config.obfuscation;
+    if (icmp_obfuscation.mode == ObfuscationMode::off) {
+      icmp_obfuscation.mode = ObfuscationMode::header_mask;
     }
+    icmp_carrier_->configure_obfuscation(icmp_obfuscation, partner->preshared);
+    if (config.role == NodeRole::client) icmp_carrier_->prime();
     carrier_ = icmp_carrier_.get();
     active_kind_ = TransportKind::icmp;
   } else {
@@ -363,7 +372,14 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
       }
       tcp_carrier_ = std::make_unique<TcpCarrier>(tcp_, far, dials, partner->preshared);
       tcp_carrier_->set_connections(config.tcp_connections);
-      if (camouflaged) tcp_carrier_->set_camouflage(config.camouflage_sni);
+      if (camouflaged) {
+      tcp_carrier_->set_camouflage(config.camouflage_sni);
+      auto camo_obfuscation = config.obfuscation;
+      if (camo_obfuscation.mode == ObfuscationMode::off) {
+        camo_obfuscation.mode = ObfuscationMode::header_mask;
+      }
+      tcp_carrier_->configure_obfuscation(camo_obfuscation, partner->preshared);
+    }
       paths_.add_path(TransportKind::tcp_tls);
     }
     if (partner != nullptr && quic_available()) {

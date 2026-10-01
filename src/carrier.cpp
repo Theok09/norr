@@ -228,11 +228,22 @@ std::expected<std::size_t, TransportError> TcpCarrier::send_batch(
 
   std::size_t sent = 0;
   for (const auto& datagram : datagrams) {
+    auto payload = datagram.payload;
+    if (obfuscator_.enabled()) {
+      wrap_scratch_.assign(datagram.payload.size() + obfuscator_.max_overhead(), std::byte{0});
+      const auto wrapped = obfuscator_.wrap(datagram.payload, wrap_scratch_);
+      if (!wrapped) {
+        ++stats_.tx_errors;
+        continue;
+      }
+      payload = std::span{wrap_scratch_}.first(*wrapped);
+    }
+
     bool delivered = false;
     const std::size_t base = datagram.flow % count;
     for (std::size_t attempt = 0; attempt < count; ++attempt) {
       auto* conn = ready_conns[(base + attempt) % count];
-      const auto result = conn->send_frame(datagram.payload);
+      const auto result = conn->send_frame(payload);
       if (result) {
         delivered = true;
         break;
@@ -246,7 +257,7 @@ std::expected<std::size_t, TransportError> TcpCarrier::send_batch(
     if (!delivered) break;
     ++sent;
     ++stats_.tx_packets;
-    stats_.tx_bytes += datagram.payload.size();
+    stats_.tx_bytes += payload.size();
   }
   return sent;
 }
@@ -267,10 +278,26 @@ std::expected<std::size_t, TransportError> TcpCarrier::receive_batch(
       ++stats_.rx_errors;
       return;
     }
+    if (obfuscator_.enabled() && unwrap_slots_.size() < out.size()) {
+      unwrap_slots_.resize(out.size());
+    }
     for (std::size_t index = 0; index < *received && delivered < out.size(); ++index) {
-      out[delivered++] = InboundDatagram{.source = peer_, .payload = inbox_[index]};
-      ++stats_.rx_packets;
       stats_.rx_bytes += inbox_[index].size();
+      if (obfuscator_.enabled()) {
+        auto& slot = unwrap_slots_[delivered];
+        slot.assign(inbox_[index].size(), std::byte{0});
+        const auto plain = obfuscator_.unwrap(inbox_[index], slot);
+        if (!plain) {
+          ++stats_.rx_errors;
+          continue;
+        }
+        out[delivered] = InboundDatagram{.source = peer_,
+                                         .payload = std::span{slot}.first(*plain)};
+      } else {
+        out[delivered] = InboundDatagram{.source = peer_, .payload = inbox_[index]};
+      }
+      ++delivered;
+      ++stats_.rx_packets;
     }
   };
 
