@@ -10,6 +10,8 @@
 #include <string_view>
 #include <vector>
 
+#include "norr/reality.hpp"
+
 namespace norr {
 inline constexpr std::size_t kTlsRecordHeaderSize = 5;
 inline constexpr std::size_t kTlsMaxRecordPayload = 16384;
@@ -53,7 +55,9 @@ struct TlsRecordView {
 [[nodiscard]] std::expected<TlsRecordView, CamouflageError> parse_record(
     std::span<const std::byte> bytes) noexcept;
 
-[[nodiscard]] std::vector<std::byte> build_client_hello(std::string_view server_name);
+[[nodiscard]] std::vector<std::byte> build_client_hello(
+    std::string_view server_name, std::span<const std::byte> key_share = {},
+    std::span<const std::byte> session_id = {});
 
 [[nodiscard]] std::vector<std::byte> build_server_hello(
     std::span<const std::byte> session_id = {});
@@ -68,6 +72,24 @@ class CamouflageFramer {
 
   explicit CamouflageFramer(Role role, std::string server_name = "www.microsoft.com") noexcept
       : role_(role), server_name_(std::move(server_name)) {}
+
+  void configure_reality_client(const PublicKey& server_public,
+                                const RealityShortId& short_id) {
+    reality_enabled_ = true;
+    reality_server_public_ = server_public;
+    reality_short_id_ = short_id;
+  }
+
+  void configure_reality_server(const PrivateKey& server_private,
+                                std::uint64_t window_seconds = 120) {
+    reality_enabled_ = true;
+    reality_server_private_ = server_private;
+    reality_window_ = window_seconds;
+  }
+
+  [[nodiscard]] bool reality_enabled() const noexcept { return reality_enabled_; }
+  [[nodiscard]] bool reality_authenticated() const noexcept { return reality_authenticated_; }
+  [[nodiscard]] bool reality_rejected() const noexcept { return reality_rejected_; }
 
   [[nodiscard]] std::vector<std::byte> open();
 
@@ -96,5 +118,14 @@ class CamouflageFramer {
   std::size_t consumed_{};
   std::vector<std::byte> scratch_;
   std::vector<std::byte> pending_reply_;
+
+  bool reality_enabled_{};
+  bool reality_authenticated_{};
+  bool reality_rejected_{};
+  PublicKey reality_server_public_{};
+  PrivateKey reality_server_private_{};
+  RealityShortId reality_short_id_{};
+  KeyPair reality_ephemeral_{};
+  std::uint64_t reality_window_{120};
 };
 }

@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <utility>
 
 #include "norr/crypto.hpp"
+#include "norr/reality.hpp"
 
 namespace norr {
 namespace {
@@ -46,6 +48,61 @@ std::vector<std::byte> framed_handshake(std::uint8_t message_type,
   push_bytes(record, handshake);
   return record;
 }
+
+std::uint64_t unix_now() noexcept {
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::seconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count());
+}
+
+std::span<const std::byte> extract_key_share_x25519(std::span<const std::byte> record) noexcept {
+  const auto rd16 = [](std::span<const std::byte> b, std::size_t o) {
+    return (static_cast<std::size_t>(static_cast<std::uint8_t>(b[o])) << 8U) |
+           static_cast<std::size_t>(static_cast<std::uint8_t>(b[o + 1]));
+  };
+  std::size_t p = kTlsRecordHeaderSize + 4;
+  if (record.size() < p + 2 + kTlsRandomSize + 1) return {};
+  p += 2 + kTlsRandomSize;
+  const auto sid_len = static_cast<std::size_t>(static_cast<std::uint8_t>(record[p]));
+  p += 1 + sid_len;
+  if (record.size() < p + 2) return {};
+  const auto cipher_len = rd16(record, p);
+  p += 2 + cipher_len;
+  if (record.size() < p + 1) return {};
+  const auto comp_len = static_cast<std::size_t>(static_cast<std::uint8_t>(record[p]));
+  p += 1 + comp_len;
+  if (record.size() < p + 2) return {};
+  const auto ext_total = rd16(record, p);
+  p += 2;
+  const auto ext_end = std::min(record.size(), p + ext_total);
+  while (p + 4 <= ext_end) {
+    const auto ext_type = rd16(record, p);
+    const auto ext_len = rd16(record, p + 2);
+    const auto ext_body = p + 4;
+    if (ext_body + ext_len > ext_end) break;
+    if (ext_type == 0x0033) {
+      std::size_t q = ext_body;
+      if (q + 2 > ext_body + ext_len) return {};
+      const auto list_len = rd16(record, q);
+      q += 2;
+      const auto list_end = std::min(ext_body + ext_len, q + list_len);
+      while (q + 4 <= list_end) {
+        const auto group = rd16(record, q);
+        const auto klen = rd16(record, q + 2);
+        const auto kbody = q + 4;
+        if (kbody + klen > list_end) break;
+        if (group == 0x001d && klen == kPublicKeySize) {
+          return record.subspan(kbody, klen);
+        }
+        q = kbody + klen;
+      }
+      return {};
+    }
+    p = ext_body + ext_len;
+  }
+  return {};
+}
 }
 
 std::size_t write_record_header(TlsRecordType type, std::size_t length,
@@ -75,7 +132,9 @@ std::expected<TlsRecordView, CamouflageError> parse_record(
                        .consumed = kTlsRecordHeaderSize + length};
 }
 
-std::vector<std::byte> build_client_hello(std::string_view server_name) {
+std::vector<std::byte> build_client_hello(std::string_view server_name,
+                                         std::span<const std::byte> key_share,
+                                         std::span<const std::byte> session_id) {
   static constexpr std::array<std::uint16_t, 15> kCiphers{
       0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9,
       0xcca8, 0xc013, 0xc014, 0x009c, 0x009d, 0x002f, 0x0035};
@@ -84,7 +143,11 @@ std::vector<std::byte> build_client_hello(std::string_view server_name) {
   push_u16(body, 0x0303);
   push_random(body, kTlsRandomSize);
   push_u8(body, static_cast<std::uint8_t>(kTlsSessionIdSize));
-  push_random(body, kTlsSessionIdSize);
+  if (session_id.size() == kTlsSessionIdSize) {
+    push_bytes(body, session_id);
+  } else {
+    push_random(body, kTlsSessionIdSize);
+  }
 
   push_u16(body, static_cast<std::uint16_t>(kCiphers.size() * 2));
   for (const auto cipher : kCiphers) push_u16(body, cipher);
@@ -154,7 +217,11 @@ std::vector<std::byte> build_client_hello(std::string_view server_name) {
     push_u16(ext, static_cast<std::uint16_t>(kTlsRandomSize + 4));
     push_u16(ext, 0x001d);
     push_u16(ext, static_cast<std::uint16_t>(kTlsRandomSize));
-    push_random(ext, kTlsRandomSize);
+    if (key_share.size() == kTlsRandomSize) {
+      push_bytes(ext, key_share);
+    } else {
+      push_random(ext, kTlsRandomSize);
+    }
   }
 
   push_u16(body, static_cast<std::uint16_t>(ext.size()));
@@ -214,8 +281,15 @@ bool looks_like_client_hello(std::span<const std::byte> bytes) noexcept {
 
 std::vector<std::byte> CamouflageFramer::open() {
   opened_ = true;
-  if (role_ == Role::client) return build_client_hello(server_name_);
-  return {};
+  if (role_ != Role::client) return {};
+  if (reality_enabled_) {
+    auto hello = reality_client_hello(reality_server_public_, reality_short_id_, unix_now());
+    if (hello) {
+      reality_ephemeral_ = hello->ephemeral;
+      return build_client_hello(server_name_, hello->ephemeral.public_key, hello->session_id);
+    }
+  }
+  return build_client_hello(server_name_);
 }
 
 std::vector<std::byte> CamouflageFramer::wrap(std::span<const std::byte> payload) const {
@@ -264,6 +338,20 @@ std::expected<std::span<const std::byte>, CamouflageError> CamouflageFramer::nex
           const auto sid_len = static_cast<std::size_t>(view[kSessionIdLenOffset]);
           if (sid_len <= 32 && view.size() >= kSessionIdLenOffset + 1 + sid_len) {
             session_id = view.subspan(kSessionIdLenOffset + 1, sid_len);
+          }
+        }
+        if (reality_enabled_) {
+          const auto key_share = extract_key_share_x25519(view.first(record->consumed));
+          if (key_share.size() == kPublicKeySize &&
+              session_id.size() == kRealitySessionIdSize) {
+            PublicKey share{};
+            std::copy(key_share.begin(), key_share.end(), share.begin());
+            const auto verdict = reality_server_verify(reality_server_private_, share,
+                                                       session_id, unix_now(), reality_window_);
+            reality_authenticated_ = verdict.authenticated;
+            reality_rejected_ = !verdict.authenticated;
+          } else {
+            reality_rejected_ = true;
           }
         }
         pending_reply_ = build_server_hello(session_id);
