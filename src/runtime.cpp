@@ -311,7 +311,10 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
     }
 
     tcp_carrier_ = std::make_unique<TcpCarrier>(tcp_, far, dialing, partner->preshared);
-    tcp_carrier_->set_connections(config.tcp_connections);
+    tcp_carrier_->set_connections(
+        (!config.reality_private_key.empty() || !config.reality_public_key.empty())
+            ? std::uint8_t{1}
+            : config.tcp_connections);
     if (camouflaged) {
       tcp_carrier_->set_camouflage(config.camouflage_sni);
       auto camo_obfuscation = config.obfuscation;
@@ -433,7 +436,10 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
         }
       }
       tcp_carrier_ = std::make_unique<TcpCarrier>(tcp_, far, dials, partner->preshared);
-      tcp_carrier_->set_connections(config.tcp_connections);
+      tcp_carrier_->set_connections(
+        (!config.reality_private_key.empty() || !config.reality_public_key.empty())
+            ? std::uint8_t{1}
+            : config.tcp_connections);
       if (camouflaged) {
       tcp_carrier_->set_camouflage(config.camouflage_sni);
       auto camo_obfuscation = config.obfuscation;
