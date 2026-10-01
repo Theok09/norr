@@ -14,6 +14,7 @@
 #include "norr/endpoint.hpp"
 #include "norr/file_descriptor.hpp"
 #include "norr/rate_limit.hpp"
+#include "norr/reality.hpp"
 #include "norr/tls.hpp"
 #include "norr/udp_transport.hpp"
 
@@ -96,6 +97,23 @@ class TcpTransport {
 
   [[nodiscard]] bool camouflage_enabled() const noexcept { return camo_.has_value(); }
 
+  void set_reality_client(const PublicKey& server_public, const RealityShortId& short_id) {
+    reality_mode_ = RealityMode::client;
+    reality_server_public_ = server_public;
+    reality_short_id_ = short_id;
+  }
+  void set_reality_server(const PrivateKey& server_private, std::uint64_t window_seconds) {
+    reality_mode_ = RealityMode::server;
+    reality_server_private_ = server_private;
+    reality_window_ = window_seconds;
+  }
+  [[nodiscard]] bool reality_rejected() const noexcept {
+    return camo_.has_value() && camo_->reality_rejected();
+  }
+  [[nodiscard]] bool reality_authenticated() const noexcept {
+    return camo_.has_value() && camo_->reality_authenticated();
+  }
+
   [[nodiscard]] bool camouflage_established() const noexcept { return camo_ready_; }
 
   [[nodiscard]] std::expected<bool, TransportError> poll_camouflage();
@@ -139,6 +157,12 @@ class TcpTransport {
   std::optional<TlsSession> tls_;
   std::optional<CamouflageFramer> camo_;
   bool camo_ready_{};
+  enum class RealityMode { off, client, server };
+  RealityMode reality_mode_{RealityMode::off};
+  PublicKey reality_server_public_{};
+  PrivateKey reality_server_private_{};
+  RealityShortId reality_short_id_{};
+  std::uint64_t reality_window_{120};
   TcpStats stats_{};
 };
 

@@ -153,6 +153,7 @@ void TcpCarrier::drive(TcpTransport& transport, bool& tls_started, bool dialing)
   if (camouflage_) {
     if (!tls_started) {
       const auto role = dialing ? CamouflageFramer::Role::client : CamouflageFramer::Role::server;
+      apply_reality(transport);
       if (transport.enable_camouflage(role, sni_)) {
         tls_started = true;
       } else {

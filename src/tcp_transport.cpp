@@ -432,6 +432,11 @@ std::expected<void, TransportError> TcpTransport::enable_camouflage(CamouflageFr
     return std::unexpected(TransportError::already_started);
   }
   camo_.emplace(role, std::move(server_name));
+  if (reality_mode_ == RealityMode::client) {
+    camo_->configure_reality_client(reality_server_public_, reality_short_id_);
+  } else if (reality_mode_ == RealityMode::server) {
+    camo_->configure_reality_server(reality_server_private_, reality_window_);
+  }
   camo_ready_ = false;
   auto hello = camo_->open();
   if (!hello.empty()) {

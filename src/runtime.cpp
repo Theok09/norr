@@ -19,6 +19,7 @@
 
 #include "norr/address.hpp"
 #include "norr/blake2s.hpp"
+#include "norr/reality.hpp"
 #include "norr/handshake.hpp"
 #include "norr/handshake_frame.hpp"
 #include "norr/packet.hpp"
@@ -276,6 +277,19 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
         camo_obfuscation.mode = ObfuscationMode::header_mask;
       }
       tcp_carrier_->configure_obfuscation(camo_obfuscation, partner->preshared);
+      if (config.role == NodeRole::server && !config.reality_private_key.empty()) {
+        PrivateKey reality_priv{};
+        if (decode_hex(config.reality_private_key, reality_priv)) {
+          tcp_carrier_->set_reality_server(reality_priv, 120);
+        }
+      } else if (!config.reality_public_key.empty() && !config.reality_short_id.empty()) {
+        PublicKey reality_pub{};
+        RealityShortId reality_sid{};
+        if (decode_hex(config.reality_public_key, reality_pub) &&
+            decode_hex(config.reality_short_id, reality_sid)) {
+          tcp_carrier_->set_reality_client(reality_pub, reality_sid);
+        }
+      }
     }
     carrier_ = tcp_carrier_.get();
     active_kind_ = TransportKind::tcp_tls;
@@ -379,6 +393,19 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
         camo_obfuscation.mode = ObfuscationMode::header_mask;
       }
       tcp_carrier_->configure_obfuscation(camo_obfuscation, partner->preshared);
+      if (config.role == NodeRole::server && !config.reality_private_key.empty()) {
+        PrivateKey reality_priv{};
+        if (decode_hex(config.reality_private_key, reality_priv)) {
+          tcp_carrier_->set_reality_server(reality_priv, 120);
+        }
+      } else if (!config.reality_public_key.empty() && !config.reality_short_id.empty()) {
+        PublicKey reality_pub{};
+        RealityShortId reality_sid{};
+        if (decode_hex(config.reality_public_key, reality_pub) &&
+            decode_hex(config.reality_short_id, reality_sid)) {
+          tcp_carrier_->set_reality_client(reality_pub, reality_sid);
+        }
+      }
     }
       paths_.add_path(TransportKind::tcp_tls);
     }

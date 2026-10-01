@@ -333,6 +333,18 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
     } else if (qualified == "transport.sni") {
       if (value.empty() || value.size() > 253) return fail(ConfigError::invalid_value);
       config.camouflage_sni = std::string{value};
+    } else if (qualified == "transport.reality_private_key") {
+      if (!is_hex_key(value)) return fail(ConfigError::invalid_value);
+      config.reality_private_key = std::string{value};
+    } else if (qualified == "transport.reality_public_key") {
+      if (!is_hex_key(value)) return fail(ConfigError::invalid_value);
+      config.reality_public_key = std::string{value};
+    } else if (qualified == "transport.reality_short_id") {
+      if (value.size() != 16) return fail(ConfigError::invalid_value);
+      config.reality_short_id = std::string{value};
+    } else if (qualified == "transport.reality_cover") {
+      if (value.empty() || value.size() > 300) return fail(ConfigError::invalid_value);
+      config.reality_cover = std::string{value};
     } else if (qualified == "fec.mode") {
       if (value == "off") config.fec = FecMode::off;
       else if (value == "light") config.fec = FecMode::light;

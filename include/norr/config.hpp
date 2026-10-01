@@ -97,6 +97,10 @@ struct Config {
   std::uint8_t tcp_connections{1};
   CamouflageMode camouflage{CamouflageMode::off};
   std::string camouflage_sni{"www.microsoft.com"};
+  std::string reality_private_key;
+  std::string reality_public_key;
+  std::string reality_short_id;
+  std::string reality_cover;
 
   bool qos_enabled{false};
   std::uint64_t qos_rate_bytes{};

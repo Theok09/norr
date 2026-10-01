@@ -148,6 +148,17 @@ class TcpCarrier final : public Carrier {
     obfuscator_.configure(config, preshared);
   }
 
+  void set_reality_client(const PublicKey& server_public, const RealityShortId& short_id) {
+    reality_mode_ = RealityMode::client;
+    reality_server_public_ = server_public;
+    reality_short_id_ = short_id;
+  }
+  void set_reality_server(const PrivateKey& server_private, std::uint64_t window_seconds) {
+    reality_mode_ = RealityMode::server;
+    reality_server_private_ = server_private;
+    reality_window_ = window_seconds;
+  }
+
   [[nodiscard]] bool ready() const noexcept {
     return transport_->connected() &&
            (camouflage_ ? transport_->camouflage_established() : transport_->tls_established());
@@ -191,6 +202,20 @@ class TcpCarrier final : public Carrier {
   std::size_t target_{1};
   std::vector<TcpTransport> extra_;
   std::vector<bool> extra_started_;
+
+  enum class RealityMode { off, client, server };
+  RealityMode reality_mode_{RealityMode::off};
+  PublicKey reality_server_public_{};
+  PrivateKey reality_server_private_{};
+  RealityShortId reality_short_id_{};
+  std::uint64_t reality_window_{120};
+  void apply_reality(TcpTransport& transport) const {
+    if (reality_mode_ == RealityMode::client) {
+      transport.set_reality_client(reality_server_public_, reality_short_id_);
+    } else if (reality_mode_ == RealityMode::server) {
+      transport.set_reality_server(reality_server_private_, reality_window_);
+    }
+  }
 };
 
 class QuicCarrier final : public Carrier {
