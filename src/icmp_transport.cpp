@@ -119,6 +119,7 @@ std::expected<void, TransportError> IcmpTransport::start(const Endpoint& bind_ad
   static_cast<void>(bind_address);
   socket_ = std::move(descriptor);
   role_ = role;
+  scratch_.resize(kIcmpHeaderSize + kDefaultDatagramSize);
   return {};
 }
 
@@ -139,7 +140,8 @@ std::expected<std::size_t, TransportError> IcmpTransport::send_batch(
 
   std::size_t sent = 0;
   for (const auto& datagram : datagrams) {
-    scratch_.assign(kIcmpHeaderSize + datagram.payload.size(), std::byte{0});
+    const auto needed = kIcmpHeaderSize + datagram.payload.size();
+    if (scratch_.size() < needed) scratch_.resize(needed);
     const auto framed = build_icmp_echo(type, identifier_, sequence_++, datagram.payload, scratch_);
     if (framed == 0) {
       ++stats_.tx_errors;

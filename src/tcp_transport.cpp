@@ -21,6 +21,8 @@ namespace norr {
 namespace {
 #if defined(__linux__)
 
+constexpr int kTcpNotSentLowat = 16384;
+
 [[nodiscard]] socklen_t fill_sockaddr(const Endpoint& endpoint, sockaddr_storage& storage) noexcept {
   std::memset(&storage, 0, sizeof(storage));
   const auto octets = endpoint.address().bytes();
@@ -239,6 +241,11 @@ std::expected<void, TransportError> TcpTransport::connect(const Endpoint& peer) 
   if (::setsockopt(descriptor.get(), IPPROTO_TCP, TCP_NODELAY, &enable, sizeof(enable)) != 0) {
     return std::unexpected(TransportError::socket_option_failed);
   }
+#if defined(TCP_NOTSENT_LOWAT)
+  const int lowat = kTcpNotSentLowat;
+  static_cast<void>(
+      ::setsockopt(descriptor.get(), IPPROTO_TCP, TCP_NOTSENT_LOWAT, &lowat, sizeof(lowat)));
+#endif
   if (!set_non_blocking(descriptor.get())) {
     return std::unexpected(TransportError::socket_option_failed);
   }
@@ -601,6 +608,10 @@ std::expected<std::optional<TcpTransport>, TransportError> TcpListener::accept()
 
   const int enable = 1;
   static_cast<void>(::setsockopt(descriptor, IPPROTO_TCP, TCP_NODELAY, &enable, sizeof(enable)));
+#if defined(TCP_NOTSENT_LOWAT)
+  const int lowat = kTcpNotSentLowat;
+  static_cast<void>(::setsockopt(descriptor, IPPROTO_TCP, TCP_NOTSENT_LOWAT, &lowat, sizeof(lowat)));
+#endif
 
   TcpTransport accepted;
   accepted.socket_ = FileDescriptor{descriptor};

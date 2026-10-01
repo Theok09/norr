@@ -86,8 +86,23 @@ for t in $ORDER; do
 done
 
 if [ -z "$best" ]; then
-  logger -t norr-failover "NO healthy tunnel: $(tr '\n' ' ' < $METRICS)"
-  exit 0
+  # nothing healthy: route to the least-bad reachable path (lowest loss, then latency)
+  bestloss=100
+  for t in $ORDER; do
+    [ "${PCT[$t]}" -eq 0 ] && continue
+    loss=$(( 100 - PCT[$t] ))
+    if [ "$loss" -lt "$bestloss" ] || { [ "$loss" -eq "$bestloss" ] && [ -n "$best" ] && [ "${AVG[$t]}" -lt "${AVG[$best]}" ]; }; then
+      bestloss=$loss; best=$t
+    fi
+  done
+  if [ -z "$best" ]; then
+    logger -t norr-failover "NO reachable tunnel: $(tr '\n' ' ' < $METRICS)"
+    exit 0
+  fi
+  if [ "$best" != "$cur" ]; then
+    LPCT=${PCT[$best]}; LAVG=${AVG[$best]}; apply "$best"
+  fi
+  rm -f $HYST; exit 0
 fi
 
 # no current, or current gone unhealthy -> jump to best immediately (fast escape)
