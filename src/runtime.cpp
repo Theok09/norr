@@ -14,6 +14,9 @@
 #include <linux/sock_diag.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <cstring>
 #endif
 #include <thread>
 
@@ -45,6 +48,45 @@ using Diagnostic = RuntimeDiagnostic;
   return static_cast<std::uint8_t>(datagram[0]) < 0x10U;
 }
 }
+
+
+#if defined(__linux__)
+std::optional<Endpoint> resolve_cover(const std::string& host_port) noexcept {
+  const auto colon = host_port.rfind(':');
+  if (colon == std::string::npos || colon == 0) return std::nullopt;
+  const auto host = host_port.substr(0, colon);
+  const auto port = static_cast<std::uint16_t>(std::atoi(host_port.c_str() + colon + 1));
+  if (port == 0) return std::nullopt;
+
+  addrinfo hints{};
+  hints.ai_family = AF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  addrinfo* result = nullptr;
+  if (::getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || result == nullptr) {
+    return std::nullopt;
+  }
+  std::optional<Endpoint> endpoint;
+  for (auto* ai = result; ai != nullptr; ai = ai->ai_next) {
+    if (ai->ai_family == AF_INET) {
+      std::array<std::byte, 4> octets{};
+      const auto* in = reinterpret_cast<sockaddr_in*>(ai->ai_addr);
+      std::memcpy(octets.data(), &in->sin_addr.s_addr, 4);
+      endpoint = Endpoint{Address::from_bytes(AddressFamily::ipv4, octets), port};
+      break;
+    }
+    if (ai->ai_family == AF_INET6) {
+      std::array<std::byte, 16> octets{};
+      const auto* in6 = reinterpret_cast<sockaddr_in6*>(ai->ai_addr);
+      std::memcpy(octets.data(), &in6->sin6_addr, 16);
+      endpoint = Endpoint{Address::from_bytes(AddressFamily::ipv6, octets), port};
+    }
+  }
+  ::freeaddrinfo(result);
+  return endpoint;
+}
+#else
+std::optional<Endpoint> resolve_cover(const std::string&) noexcept { return std::nullopt; }
+#endif
 
 bool decode_hex(std::string_view text, std::span<std::byte> out) noexcept {
   if (text.size() != out.size() * 2) return false;
@@ -281,6 +323,12 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
         PrivateKey reality_priv{};
         if (decode_hex(config.reality_private_key, reality_priv)) {
           tcp_carrier_->set_reality_server(reality_priv, 120);
+          if (!config.reality_cover.empty()) {
+            if (auto cover = resolve_cover(config.reality_cover); cover.has_value()) {
+              reality_cover_ = *cover;
+              reality_cover_valid_ = true;
+            }
+          }
         }
       } else if (!config.reality_public_key.empty() && !config.reality_short_id.empty()) {
         PublicKey reality_pub{};
@@ -397,6 +445,12 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
         PrivateKey reality_priv{};
         if (decode_hex(config.reality_private_key, reality_priv)) {
           tcp_carrier_->set_reality_server(reality_priv, 120);
+          if (!config.reality_cover.empty()) {
+            if (auto cover = resolve_cover(config.reality_cover); cover.has_value()) {
+              reality_cover_ = *cover;
+              reality_cover_valid_ = true;
+            }
+          }
         }
       } else if (!config.reality_public_key.empty() && !config.reality_short_id.empty()) {
         PublicKey reality_pub{};
@@ -747,9 +801,28 @@ void Runtime::service_tcp_carrier(Instant now) {
   tcp_carrier->poll(now);
   tcp_ready_ = tcp_carrier->ready();
 
+  if (reality_cover_valid_ && tcp_.reality_rejected()) {
+    auto prelude = tcp_.take_fallback_prelude();
+    auto client = tcp_.release_socket();
+    tcp_accepted_at_ = Instant{};
+    tcp_ready_ = false;
+    if (client.valid()) {
+      FallbackProxy proxy;
+      if (proxy.start(std::move(client), reality_cover_, prelude)) {
+        fallbacks_.push_back(std::move(proxy));
+      }
+    }
+  }
+
   if (tcp_ready_ && !was_ready) {
     static_cast<void>(dial_configured_peers());
   }
+}
+
+
+void Runtime::service_fallbacks() {
+  for (auto& proxy : fallbacks_) proxy.pump();
+  std::erase_if(fallbacks_, [](const FallbackProxy& p) { return !p.active(); });
 }
 
 void Runtime::service_quic_carrier() {
@@ -966,6 +1039,17 @@ void Runtime::wait_for_work(Instant now) {
       if (descriptor != tcp_.descriptor()) watch(descriptor);
     });
   }
+  for (const auto& proxy : fallbacks_) {
+    if (!proxy.active()) continue;
+    if (proxy.client_fd() >= 0) {
+      watched.push_back(pollfd{.fd = proxy.client_fd(), .events = POLLIN, .revents = 0});
+      if (proxy.wants_client_write()) watched.back().events |= POLLOUT;
+    }
+    if (proxy.cover_fd() >= 0) {
+      watched.push_back(pollfd{.fd = proxy.cover_fd(), .events = POLLIN, .revents = 0});
+      if (proxy.wants_cover_write()) watched.back().events |= POLLOUT;
+    }
+  }
   if (tcp_listener_.listening()) {
     auto* tcp_carrier = dynamic_cast<TcpCarrier*>(carrier_);
     const bool want = !tcp_.connected() || (tcp_carrier != nullptr && tcp_carrier->wants_more());
@@ -1038,6 +1122,7 @@ void Runtime::run() {
     sessions_.expire_retired(now);
     redial_dead_peers(now);
     service_tcp_carrier(now);
+    service_fallbacks();
     service_quic_carrier();
     apply_congestion_control(now);
     report_loss(now);

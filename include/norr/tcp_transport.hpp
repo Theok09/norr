@@ -113,6 +113,18 @@ class TcpTransport {
   [[nodiscard]] bool reality_authenticated() const noexcept {
     return camo_.has_value() && camo_->reality_authenticated();
   }
+  [[nodiscard]] std::vector<std::byte> take_fallback_prelude() {
+    return camo_.has_value() ? camo_->take_fallback_prelude() : std::vector<std::byte>{};
+  }
+  [[nodiscard]] FileDescriptor release_socket() noexcept {
+    state_ = TcpState::closed;
+    reassembler_.reset();
+    outbox_.clear();
+    tls_.reset();
+    camo_.reset();
+    camo_ready_ = false;
+    return std::move(socket_);
+  }
 
   [[nodiscard]] bool camouflage_established() const noexcept { return camo_ready_; }
 

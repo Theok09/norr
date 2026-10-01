@@ -8,6 +8,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "norr/reality.hpp"
@@ -90,6 +91,9 @@ class CamouflageFramer {
   [[nodiscard]] bool reality_enabled() const noexcept { return reality_enabled_; }
   [[nodiscard]] bool reality_authenticated() const noexcept { return reality_authenticated_; }
   [[nodiscard]] bool reality_rejected() const noexcept { return reality_rejected_; }
+  [[nodiscard]] std::vector<std::byte> take_fallback_prelude() {
+    return std::exchange(fallback_prelude_, {});
+  }
 
   [[nodiscard]] std::vector<std::byte> open();
 
@@ -127,5 +131,6 @@ class CamouflageFramer {
   RealityShortId reality_short_id_{};
   KeyPair reality_ephemeral_{};
   std::uint64_t reality_window_{120};
+  std::vector<std::byte> fallback_prelude_;
 };
 }

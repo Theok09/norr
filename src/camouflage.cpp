@@ -353,6 +353,10 @@ std::expected<std::span<const std::byte>, CamouflageError> CamouflageFramer::nex
           } else {
             reality_rejected_ = true;
           }
+          if (reality_rejected_) {
+            const auto raw = view.first(record->consumed);
+            fallback_prelude_.assign(raw.begin(), raw.end());
+          }
         }
         pending_reply_ = build_server_hello(session_id);
         const auto ccs = build_change_cipher_spec();

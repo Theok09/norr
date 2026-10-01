@@ -12,6 +12,7 @@
 #include "norr/config.hpp"
 #include "norr/congestion.hpp"
 #include "norr/carrier.hpp"
+#include "norr/fallback_proxy.hpp"
 #include "norr/control_plane.hpp"
 #include "norr/crypto.hpp"
 #include "norr/routing.hpp"
@@ -163,6 +164,10 @@ class Runtime {
   bool tcp_ready_{};
   Instant tcp_accepted_at_{};
   bool quic_ready_{};
+  Endpoint reality_cover_{};
+  bool reality_cover_valid_{};
+  std::vector<FallbackProxy> fallbacks_;
+  void service_fallbacks();
 
   IcmpTransport icmp_transport_;
   std::unique_ptr<UdpCarrier> udp_carrier_;

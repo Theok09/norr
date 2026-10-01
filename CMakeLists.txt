@@ -58,6 +58,7 @@ add_library(norr_core
     src/noise.cpp
     src/obfuscation.cpp
     src/reality.cpp
+    src/fallback_proxy.cpp
     src/offload.cpp
     src/parallel.cpp
     src/nonce.cpp
