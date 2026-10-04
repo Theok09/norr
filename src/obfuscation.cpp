@@ -47,8 +47,11 @@ std::byte Obfuscator::next_junk_byte() noexcept {
 }
 
 void Obfuscator::next_nonce(std::span<std::byte> out) noexcept {
-  if (random_bytes(out.first(kObfuscationNonceSize))) return;
-  const auto value = nonce_counter_++;
+  auto value = nonce_counter_++;
+  value += 0x9E3779B97F4A7C15ULL;
+  value = (value ^ (value >> 30U)) * 0xBF58476D1CE4E5B9ULL;
+  value = (value ^ (value >> 27U)) * 0x94D049BB133111EBULL;
+  value ^= value >> 31U;
   for (std::size_t index = 0; index < kObfuscationNonceSize; ++index) {
     out[index] = static_cast<std::byte>((value >> (8U * (7U - index))) & 0xFFU);
   }
