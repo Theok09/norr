@@ -10,6 +10,7 @@
 
 #include "norr/endpoint.hpp"
 #include "norr/file_descriptor.hpp"
+#include "norr/timers.hpp"
 #include "norr/udp_transport.hpp"
 
 namespace norr {
@@ -28,6 +29,12 @@ class FallbackProxy {
   [[nodiscard]] int cover_fd() const noexcept { return cover_.get(); }
   [[nodiscard]] bool wants_cover_write() const noexcept { return connecting_ || !to_cover_.empty(); }
   [[nodiscard]] bool wants_client_write() const noexcept { return !to_client_.empty(); }
+  [[nodiscard]] bool wants_client_read() const noexcept {
+    return !client_eof_ && to_cover_.size() < kBufferLimit;
+  }
+  [[nodiscard]] bool wants_cover_read() const noexcept {
+    return !connecting_ && !cover_eof_ && to_client_.size() < kBufferLimit;
+  }
 
   void pump();
   void close() noexcept;
@@ -38,8 +45,11 @@ class FallbackProxy {
   std::vector<std::byte> to_cover_;
   std::vector<std::byte> to_client_;
   bool connecting_{};
-  [[maybe_unused]] bool client_eof_{};
-  [[maybe_unused]] bool cover_eof_{};
+  bool client_eof_{};
+  bool cover_eof_{};
+  bool cover_shut_{};
+  bool client_shut_{};
+  Instant last_activity_{};
   bool active_{};
 };
 }

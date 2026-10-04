@@ -49,6 +49,12 @@ inline constexpr auto kKeepaliveInterval = std::chrono::seconds{25};
 
 inline constexpr auto kTcpCarrierSilenceTimeout = std::chrono::seconds{75};
 
+inline constexpr auto kPrimaryStaleAfter = std::chrono::seconds{30};
+inline constexpr auto kPendingConnectionDeadline = std::chrono::seconds{10};
+inline constexpr std::size_t kMaximumPendingConnections = 16;
+inline constexpr std::size_t kMaximumFallbackProxies = 64;
+inline constexpr auto kFallbackIdleTimeout = std::chrono::seconds{60};
+
 inline constexpr auto kTransportCheckInterval = std::chrono::seconds{5};
 inline constexpr auto kTransportSettleTime = std::chrono::seconds{15};
 

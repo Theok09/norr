@@ -794,29 +794,29 @@ void Runtime::service_tcp_carrier(Instant now) {
     }
   }
 
-  while (tcp_listener_.listening() && tcp_carrier != nullptr) {
+  while (tcp_listener_.listening() && tcp_carrier != nullptr &&
+         pending_.size() < kMaximumPendingConnections) {
     auto incoming = tcp_listener_.accept();
     if (!incoming || !incoming->has_value()) break;
     auto conn = std::move(**incoming);
     conn.set_mark(fwmark_);
-    if (reality_server_) {
-      if (pending_.size() < 16) {
-        pending_.push_back(std::move(conn));
-        pending_since_.push_back(now);
-      }
-    } else if (tcp_carrier->wants_more()) {
+    if (!reality_server_ && tcp_carrier->wants_more()) {
       tcp_carrier->adopt(std::move(conn));
+      continue;
     }
+    pending_.push_back(std::move(conn));
+    pending_since_.push_back(now);
   }
 
-  if (reality_server_) drive_pending(now);
+  if (tcp_carrier != nullptr) drive_pending(now);
 
   if (tcp_listener_.listening() && tcp_.connected() && tcp_accepted_at_ != Instant{} &&
       now - tcp_accepted_at_ > std::chrono::seconds{15}) {
     bool any_received = false;
     for (PeerId peer = 1; peer <= peer_count_; ++peer) {
       auto session = sessions_.find_by_peer(peer);
-      if (session != nullptr && session->has_received()) {
+      if (session != nullptr && session->has_received() &&
+          session->last_received() > tcp_accepted_at_) {
         any_received = true;
         break;
       }
@@ -840,7 +840,8 @@ void Runtime::service_tcp_carrier(Instant now) {
     tcp_ready_ = false;
     if (client.valid()) {
       FallbackProxy proxy;
-      if (proxy.start(std::move(client), reality_cover_, prelude)) {
+      if (fallbacks_.size() < kMaximumFallbackProxies &&
+          proxy.start(std::move(client), reality_cover_, prelude)) {
         fallbacks_.push_back(std::move(proxy));
       }
     }
@@ -877,34 +878,75 @@ void Runtime::service_fallbacks() {
   std::erase_if(fallbacks_, [](const FallbackProxy& p) { return !p.active(); });
 }
 
+Instant Runtime::primary_heard() {
+  auto heard = tcp_accepted_at_;
+  for (PeerId peer = 1; peer <= peer_count_; ++peer) {
+    auto session = sessions_.find_by_peer(peer);
+    if (session != nullptr && session->has_received()) {
+      heard = std::max(heard, session->last_received());
+    }
+  }
+  return heard;
+}
+
 void Runtime::drive_pending(Instant now) {
+  auto* tcp_carrier = dynamic_cast<TcpCarrier*>(carrier_);
+  if (tcp_carrier == nullptr) return;
+
   std::array<std::span<const std::byte>, 8> frames{};
   for (std::size_t i = 0; i < pending_.size();) {
     auto& conn = pending_[i];
-    if (!conn.camouflage_enabled() && conn.state() == TcpState::connected) {
-      conn.set_reality_server(reality_server_priv_, reality_window_);
-      static_cast<void>(conn.enable_camouflage(CamouflageFramer::Role::server, reality_sni_));
-    }
-    if (conn.connected()) static_cast<void>(conn.receive_frames(frames));
-
+    const bool expired = now - pending_since_[i] > kPendingConnectionDeadline;
     bool drop = false;
-    if (conn.reality_rejected()) {
-      if (reality_cover_valid_) {
-        auto prelude = conn.take_fallback_prelude();
-        auto client = conn.release_socket();
-        if (client.valid()) {
-          FallbackProxy proxy;
-          if (proxy.start(std::move(client), reality_cover_, prelude)) {
-            fallbacks_.push_back(std::move(proxy));
+
+    if (reality_server_) {
+      if (!conn.camouflage_enabled() && conn.state() == TcpState::connected) {
+        conn.set_reality_server(reality_server_priv_, reality_window_);
+        static_cast<void>(conn.enable_camouflage(CamouflageFramer::Role::server, reality_sni_));
+      }
+      if (conn.connected()) static_cast<void>(conn.receive_frames(frames));
+
+      if (conn.reality_rejected()) {
+        if (reality_cover_valid_ && fallbacks_.size() < kMaximumFallbackProxies) {
+          auto prelude = conn.take_fallback_prelude();
+          auto client = conn.release_socket();
+          if (client.valid()) {
+            FallbackProxy proxy;
+            if (proxy.start(std::move(client), reality_cover_, prelude)) {
+              fallbacks_.push_back(std::move(proxy));
+            }
           }
         }
+        drop = true;
+      } else if (conn.reality_authenticated()) {
+        tcp_ = std::move(conn);
+        tcp_accepted_at_ = now;
+        tcp_ready_ = false;
+        tcp_carrier->primary_replaced_started();
+        std::fprintf(stderr, "tcp carrier: authenticated reconnect took over\n");
+        std::fflush(stderr);
+        drop = true;
+      } else if (!conn.connected() || expired) {
+        drop = true;
       }
+    } else if (!conn.connected()) {
       drop = true;
-    } else if (conn.reality_authenticated()) {
-      drop = true;
-    } else if (!conn.connected() ||
-               now - pending_since_[i] > std::chrono::seconds{10}) {
-      drop = true;
+    } else {
+      tcp_carrier->reap();
+      if (tcp_carrier->wants_more()) {
+        tcp_carrier->adopt(std::move(conn));
+        drop = true;
+      } else if (!tcp_.connected() || now - primary_heard() > kPrimaryStaleAfter) {
+        tcp_ = std::move(conn);
+        tcp_accepted_at_ = now;
+        tcp_ready_ = false;
+        tcp_carrier->primary_replaced();
+        std::fprintf(stderr, "tcp carrier: replaced stale primary\n");
+        std::fflush(stderr);
+        drop = true;
+      } else if (expired) {
+        drop = true;
+      }
     }
 
     if (drop) {
@@ -1130,24 +1172,26 @@ void Runtime::wait_for_work(Instant now) {
       if (descriptor != tcp_.descriptor()) watch(descriptor);
     });
   }
-  for (const auto& conn : pending_) {
-    if (conn.connected()) watch(conn.descriptor());
+  if (reality_server_) {
+    for (const auto& conn : pending_) {
+      if (conn.connected()) watch(conn.descriptor());
+    }
   }
   for (const auto& proxy : fallbacks_) {
     if (!proxy.active()) continue;
-    if (proxy.client_fd() >= 0) {
-      watched.push_back(pollfd{.fd = proxy.client_fd(), .events = POLLIN, .revents = 0});
-      if (proxy.wants_client_write()) watched.back().events |= POLLOUT;
-    }
-    if (proxy.cover_fd() >= 0) {
-      watched.push_back(pollfd{.fd = proxy.cover_fd(), .events = POLLIN, .revents = 0});
-      if (proxy.wants_cover_write()) watched.back().events |= POLLOUT;
-    }
+    const auto add = [&](int fd, bool read, bool write) {
+      if (fd < 0 || (!read && !write)) return;
+      short events = 0;
+      if (read) events |= POLLIN;
+      if (write) events |= POLLOUT;
+      watched.push_back(pollfd{.fd = fd, .events = events, .revents = 0});
+    };
+    add(proxy.client_fd(), proxy.wants_client_read(), proxy.wants_client_write());
+    add(proxy.cover_fd(), proxy.wants_cover_read(), proxy.wants_cover_write());
   }
-  if (tcp_listener_.listening()) {
-    auto* tcp_carrier = dynamic_cast<TcpCarrier*>(carrier_);
-    const bool want = !tcp_.connected() || (tcp_carrier != nullptr && tcp_carrier->wants_more());
-    if (want) watch(tcp_listener_.descriptor());
+  if (tcp_listener_.listening() && active_kind_ == TransportKind::tcp_tls &&
+      pending_.size() < kMaximumPendingConnections) {
+    watch(tcp_listener_.descriptor());
   }
   if (metrics_.listening()) watch(metrics_.descriptor());
 

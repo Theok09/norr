@@ -178,6 +178,7 @@ class Runtime {
   std::vector<TcpTransport> pending_;
   std::vector<Instant> pending_since_;
   void drive_pending(Instant now);
+  [[nodiscard]] Instant primary_heard();
 
   IcmpTransport icmp_transport_;
   std::unique_ptr<UdpCarrier> udp_carrier_;

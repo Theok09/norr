@@ -10,6 +10,7 @@
 #if defined(__linux__)
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -72,6 +73,7 @@ std::expected<void, TransportError> FallbackProxy::start(FileDescriptor client,
   client_ = std::move(client);
   cover_ = std::move(cover_fd);
   to_cover_.assign(prelude.begin(), prelude.end());
+  last_activity_ = std::chrono::steady_clock::now();
   active_ = true;
   return {};
 }
@@ -79,7 +81,15 @@ std::expected<void, TransportError> FallbackProxy::start(FileDescriptor client,
 void FallbackProxy::pump() {
   if (!active_) return;
 
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last_activity_ > kFallbackIdleTimeout) {
+    close();
+    return;
+  }
+
   if (connecting_) {
+    pollfd probe{.fd = cover_.get(), .events = POLLOUT, .revents = 0};
+    if (::poll(&probe, 1, 0) <= 0) return;
     int error = 0;
     socklen_t len = sizeof(error);
     if (::getsockopt(cover_.get(), SOL_SOCKET, SO_ERROR, &error, &len) != 0 || error != 0) {
@@ -89,12 +99,15 @@ void FallbackProxy::pump() {
     connecting_ = false;
   }
 
-  const auto drain = [](int fd, std::vector<std::byte>& buf) -> bool {
+  std::size_t moved = 0;
+
+  const auto drain = [&moved](int fd, std::vector<std::byte>& buf) -> bool {
     std::size_t off = 0;
     while (off < buf.size()) {
       const auto n = ::send(fd, buf.data() + off, buf.size() - off, MSG_NOSIGNAL);
       if (n > 0) {
         off += static_cast<std::size_t>(n);
+        moved += static_cast<std::size_t>(n);
         continue;
       }
       if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
@@ -105,12 +118,13 @@ void FallbackProxy::pump() {
     return true;
   };
 
-  const auto pull = [](int fd, std::vector<std::byte>& dst, bool& eof) -> bool {
+  const auto pull = [&moved](int fd, std::vector<std::byte>& dst, bool& eof) -> bool {
     std::array<std::byte, 16384> tmp{};
     while (dst.size() < kBufferLimit) {
       const auto n = ::recv(fd, tmp.data(), tmp.size(), 0);
       if (n > 0) {
         dst.insert(dst.end(), tmp.begin(), tmp.begin() + n);
+        moved += static_cast<std::size_t>(n);
         continue;
       }
       if (n == 0) { eof = true; break; }
@@ -130,9 +144,21 @@ void FallbackProxy::pump() {
   if (!drain(cover_.get(), to_cover_)) { close(); return; }
   if (!drain(client_.get(), to_client_)) { close(); return; }
 
+  if (client_eof_ && to_cover_.empty() && !cover_shut_) {
+    static_cast<void>(::shutdown(cover_.get(), SHUT_WR));
+    cover_shut_ = true;
+  }
+  if (cover_eof_ && to_client_.empty() && !client_shut_) {
+    static_cast<void>(::shutdown(client_.get(), SHUT_WR));
+    client_shut_ = true;
+  }
+
   if (client_eof_ && to_cover_.empty() && cover_eof_ && to_client_.empty()) {
     close();
+    return;
   }
+
+  if (moved > 0) last_activity_ = now;
 }
 
 void FallbackProxy::close() noexcept {

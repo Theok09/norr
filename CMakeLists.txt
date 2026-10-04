@@ -398,6 +398,20 @@ if(NORR_BUILD_TESTS)
             SKIP_RETURN_CODE 77
             TIMEOUT 300)
 
+        add_test(NAME norr_e2e_tcp_stale_server
+                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norrd>
+                         bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_tcp_stale_server.sh)
+        set_tests_properties(norr_e2e_tcp_stale_server PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 300)
+
+        add_test(NAME norr_e2e_reality_probe
+                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norrd>
+                         bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_reality_probe.sh)
+        set_tests_properties(norr_e2e_reality_probe PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 120)
+
         add_test(NAME norr_e2e_fallback
                  COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norrd>
                          bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_fallback.sh)
