@@ -47,8 +47,8 @@ class FallbackProxy {
   bool connecting_{};
   bool client_eof_{};
   bool cover_eof_{};
-  bool cover_shut_{};
-  bool client_shut_{};
+  [[maybe_unused]] bool cover_shut_{};
+  [[maybe_unused]] bool client_shut_{};
   Instant last_activity_{};
   bool active_{};
 };

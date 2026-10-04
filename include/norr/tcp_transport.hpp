@@ -167,6 +167,7 @@ class TcpTransport {
   std::vector<std::byte> record_;
 
   std::vector<std::vector<std::byte>> ready_;
+  std::size_t ready_head_{};
   std::optional<TlsSession> tls_;
   std::optional<CamouflageFramer> camo_;
   bool camo_ready_{};

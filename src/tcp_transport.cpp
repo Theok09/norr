@@ -495,44 +495,56 @@ std::expected<std::size_t, TransportError> TcpTransport::receive_frames(
   if (read_buffer_.size() < 16384) read_buffer_.resize(16384);
 
   if (camo_.has_value()) {
-    while (true) {
-      const auto received = ::read(socket_.get(), read_buffer_.data(), read_buffer_.size());
-      if (received == 0) {
-        state_ = TcpState::failed;
-        ++stats_.disconnects;
-        break;
+    // Only pull from the kernel when the parsed queue is drained. Reading the
+    // whole socket into the framer every call while handing back just out.size()
+    // frames moves the backlog into an unbounded userspace buffer and defeats
+    // TCP flow control; under latency that buffer grows until the flow stalls.
+    // Leaving unread bytes in the socket lets TCP apply backpressure instead.
+    if (ready_head_ >= ready_.size()) {
+      ready_.clear();
+      ready_head_ = 0;
+      while (true) {
+        const auto received = ::read(socket_.get(), read_buffer_.data(), read_buffer_.size());
+        if (received == 0) {
+          state_ = TcpState::failed;
+          ++stats_.disconnects;
+          break;
+        }
+        if (received < 0) {
+          if (errno == EINTR) continue;
+          if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+          state_ = TcpState::failed;
+          return std::unexpected(TransportError::receive_failed);
+        }
+        camo_->feed(std::span{read_buffer_}.first(static_cast<std::size_t>(received)));
+        stats_.bytes_received += static_cast<std::uint64_t>(received);
+        // Parse what we have; stop reading once a healthy batch is queued so a
+        // burst does not pull the whole window into memory at once.
+        while (true) {
+          const auto payload = camo_->next_payload();
+          if (!payload) break;
+          ready_.emplace_back(payload->begin(), payload->end());
+        }
+        if (ready_.size() >= out.size()) break;
       }
-      if (received < 0) {
-        if (errno == EINTR) continue;
-        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+      if (camo_->violated()) {
         state_ = TcpState::failed;
         return std::unexpected(TransportError::receive_failed);
       }
-      camo_->feed(std::span{read_buffer_}.first(static_cast<std::size_t>(received)));
-      stats_.bytes_received += static_cast<std::uint64_t>(received);
+      auto reply = camo_->take_handshake_reply();
+      if (!reply.empty()) {
+        outbox_.insert(outbox_.end(), reply.begin(), reply.end());
+        static_cast<void>(flush_output());
+      }
+      if (camo_->handshake_done()) camo_ready_ = true;
     }
 
-    ready_.clear();
-    while (ready_.size() < out.size()) {
-      const auto payload = camo_->next_payload();
-      if (!payload) break;
-      ready_.emplace_back(payload->begin(), payload->end());
+    std::size_t n = 0;
+    while (n < out.size() && ready_head_ < ready_.size()) {
+      out[n++] = ready_[ready_head_++];
     }
-    if (camo_->violated()) {
-      state_ = TcpState::failed;
-      return std::unexpected(TransportError::receive_failed);
-    }
-
-    auto reply = camo_->take_handshake_reply();
-    if (!reply.empty()) {
-      outbox_.insert(outbox_.end(), reply.begin(), reply.end());
-      static_cast<void>(flush_output());
-    }
-    if (camo_->handshake_done()) camo_ready_ = true;
-
-    for (std::size_t index = 0; index < ready_.size(); ++index) out[index] = ready_[index];
-    stats_.frames_received += ready_.size();
-    return ready_.size();
+    stats_.frames_received += n;
+    return n;
   }
 
   while (true) {
