@@ -380,29 +380,34 @@ std::expected<std::span<const std::byte>, CamouflageError> CamouflageFramer::nex
       return std::unexpected(record.error());
     }
 
-    if (record->type == TlsRecordType::handshake) {
-      if (role_ == Role::client && reality_enabled_ && !reality_server_verified_) {
-        const auto frame = view.first(record->consumed);
-        if (frame.size() > kTlsRecordHeaderSize &&
-            static_cast<std::uint8_t>(frame[kTlsRecordHeaderSize]) == 0x02) {
-          // The auth tag rides in ServerHello.random: thirty-two bytes that an
-          // observer cannot tell from the random they replace. Without this the
-          // client trusts whoever answers, which is the hole an active man in
-          // the middle walks through.
-          constexpr std::size_t kRandomOffset = kTlsRecordHeaderSize + 4 + 2;
-          const auto share = extract_server_key_share(frame);
-          if (frame.size() >= kRandomOffset + kRealityAuthSize &&
-              share.size() == kPublicKeySize) {
-            const auto claimed = frame.subspan(kRandomOffset, kRealityAuthSize);
-            reality_server_verified_ = reality_verify_server_auth(
-                reality_ephemeral_.private_key, reality_server_public_, share, claimed);
-          }
-          if (!reality_server_verified_) {
-            violated_ = true;
-            return std::unexpected(CamouflageError::malformed);
-          }
-        }
+    // Nothing from the server is accepted before it has proved possession of
+    // its private key. Checking only records that happen to be a ServerHello
+    // would let an impostor skip it - send a handshake of another type, or go
+    // straight to application data - and never be challenged at all.
+    if (role_ == Role::client && reality_enabled_ && !reality_server_verified_) {
+      const auto frame = view.first(record->consumed);
+      if (record->type != TlsRecordType::handshake || frame.size() <= kTlsRecordHeaderSize ||
+          static_cast<std::uint8_t>(frame[kTlsRecordHeaderSize]) != 0x02) {
+        violated_ = true;
+        return std::unexpected(CamouflageError::malformed);
       }
+
+      // The auth tag rides in ServerHello.random: thirty-two bytes an observer
+      // cannot tell from the random they replace.
+      constexpr std::size_t kRandomOffset = kTlsRecordHeaderSize + 4 + 2;
+      const auto share = extract_server_key_share(frame);
+      if (frame.size() >= kRandomOffset + kRealityAuthSize && share.size() == kPublicKeySize) {
+        const auto claimed = frame.subspan(kRandomOffset, kRealityAuthSize);
+        reality_server_verified_ = reality_verify_server_auth(
+            reality_ephemeral_.private_key, reality_server_public_, share, claimed);
+      }
+      if (!reality_server_verified_) {
+        violated_ = true;
+        return std::unexpected(CamouflageError::malformed);
+      }
+    }
+
+    if (record->type == TlsRecordType::handshake) {
       if (role_ == Role::server && !sent_reply_ && looks_like_client_hello(view)) {
         std::span<const std::byte> session_id{};
         constexpr std::size_t kSessionIdLenOffset = kTlsRecordHeaderSize + 4 + 2 + kTlsRandomSize;
