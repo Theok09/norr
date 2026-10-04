@@ -173,6 +173,8 @@ class TcpCarrier final : public Carrier {
     sni_ = std::move(server_name);
   }
 
+  void set_pop3() noexcept { pop3_ = true; }
+
   void set_sni_pool(std::vector<std::string> pool) {
     if (pool.empty()) return;
     sni_pool_ = std::move(pool);
@@ -196,7 +198,8 @@ class TcpCarrier final : public Carrier {
   }
 
   [[nodiscard]] bool ready() const noexcept {
-    return transport_->connected() && transport_->tls_established();
+    return transport_->connected() &&
+           (pop3_ ? transport_->pop3_established() : transport_->tls_established());
   }
 
   void set_connections(std::size_t count) {
@@ -253,6 +256,7 @@ class TcpCarrier final : public Carrier {
   ConnectionSlot primary_slot_{};
   std::uint32_t mark_{};
   bool camouflage_{};
+  bool pop3_{};
   std::string sni_{};
   std::vector<std::string> sni_pool_{};
   std::size_t sni_index_{};

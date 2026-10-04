@@ -303,7 +303,8 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
                      "configure a single peer or use udp"});
     }
     const bool camouflaged = config.camouflage == CamouflageMode::fake_tls;
-    if (!camouflaged && !tls_available()) {
+    const bool pop3 = config.camouflage == CamouflageMode::pop3;
+    if (!camouflaged && !pop3 && !tls_available()) {
       return std::unexpected(Diagnostic{RuntimeError::option_not_implemented,
                                         "transport.mode = tcp-tls needs a TLS backend"});
     }
@@ -325,7 +326,16 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
         (!config.reality_private_key.empty() || !config.reality_public_key.empty())
             ? std::uint8_t{1}
             : config.tcp_connections);
-    if (camouflaged) {
+    if (pop3) {
+      tcp_carrier_->set_pop3();
+      auto pop3_obfuscation = config.obfuscation;
+      if (pop3_obfuscation.mode == ObfuscationMode::off) {
+        pop3_obfuscation.mode = ObfuscationMode::full;
+        pop3_obfuscation.junk_padding = true;
+        if (pop3_obfuscation.junk_max == 0) pop3_obfuscation.junk_max = 96;
+      }
+      tcp_carrier_->configure_obfuscation(pop3_obfuscation, partner->preshared);
+    } else if (camouflaged) {
       if (!config.reality_private_key.empty() || !config.reality_public_key.empty()) {
         return std::unexpected(Diagnostic{
             RuntimeError::option_not_implemented,
@@ -451,7 +461,8 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
                          : Endpoint{};
 
     const bool camouflaged = config.camouflage == CamouflageMode::fake_tls;
-    if (partner != nullptr && (camouflaged || tls_available())) {
+    const bool pop3 = config.camouflage == CamouflageMode::pop3;
+    if (partner != nullptr && (camouflaged || pop3 || tls_available())) {
       if (!dials) {
         if (const auto listening = tcp_listener_.listen(*bind_address); !listening) {
           return std::unexpected(
@@ -465,7 +476,16 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
         (!config.reality_private_key.empty() || !config.reality_public_key.empty())
             ? std::uint8_t{1}
             : config.tcp_connections);
-      if (camouflaged) {
+      if (pop3) {
+        tcp_carrier_->set_pop3();
+        auto pop3_obfuscation = config.obfuscation;
+        if (pop3_obfuscation.mode == ObfuscationMode::off) {
+          pop3_obfuscation.mode = ObfuscationMode::full;
+          pop3_obfuscation.junk_padding = true;
+          if (pop3_obfuscation.junk_max == 0) pop3_obfuscation.junk_max = 96;
+        }
+        tcp_carrier_->configure_obfuscation(pop3_obfuscation, partner->preshared);
+      } else if (camouflaged) {
       if (!config.reality_private_key.empty() || !config.reality_public_key.empty()) {
         return std::unexpected(Diagnostic{
             RuntimeError::option_not_implemented,

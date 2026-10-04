@@ -206,6 +206,14 @@ std::expected<void, TransportError> TcpTransport::enable_camouflage(CamouflageFr
   return std::unexpected(TransportError::unsupported_platform);
 }
 
+std::expected<void, TransportError> TcpTransport::enable_pop3(bool) {
+  return std::unexpected(TransportError::unsupported_platform);
+}
+
+std::expected<bool, TransportError> TcpTransport::poll_pop3() {
+  return std::unexpected(TransportError::unsupported_platform);
+}
+
 std::expected<bool, TransportError> TcpTransport::poll_camouflage() {
   return std::unexpected(TransportError::unsupported_platform);
 }
@@ -484,6 +492,97 @@ std::expected<bool, TransportError> TcpTransport::poll_camouflage() {
     if (!drained) return std::unexpected(drained.error());
   }
   return camo_ready_;
+}
+
+namespace {
+void append_str(std::vector<std::byte>& out, std::string_view text) {
+  for (const char c : text) out.push_back(static_cast<std::byte>(static_cast<unsigned char>(c)));
+}
+}
+
+std::expected<void, TransportError> TcpTransport::enable_pop3(bool client) {
+  if (!socket_.valid()) return std::unexpected(TransportError::not_started);
+  if (tls_.has_value() || camo_.has_value() || pop3_active_) {
+    return std::unexpected(TransportError::already_started);
+  }
+  pop3_active_ = true;
+  pop3_ready_ = false;
+  pop3_client_ = client;
+  pop3_step_ = 0;
+  pop3_inbox_.clear();
+  if (!client) {
+    append_str(outbox_, "+OK POP3 ready\r\n");
+  }
+  return {};
+}
+
+std::expected<bool, TransportError> TcpTransport::poll_pop3() {
+  if (!pop3_active_) return true;
+  if (state_ != TcpState::connected) return std::unexpected(TransportError::not_started);
+  if (pop3_ready_) return true;
+
+  if (!outbox_.empty()) {
+    const auto drained = flush_output();
+    if (!drained) return std::unexpected(drained.error());
+    if (!outbox_.empty()) return false;
+  }
+
+  std::array<std::byte, 512> buf{};
+  while (true) {
+    const auto got = ::recv(socket_.get(), buf.data(), buf.size(), 0);
+    if (got > 0) {
+      pop3_inbox_.insert(pop3_inbox_.end(), buf.begin(),
+                         buf.begin() + static_cast<std::ptrdiff_t>(got));
+      continue;
+    }
+    if (got == 0) {
+      state_ = TcpState::failed;
+      return std::unexpected(TransportError::receive_failed);
+    }
+    if (errno == EINTR) continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+    state_ = TcpState::failed;
+    return std::unexpected(TransportError::receive_failed);
+  }
+
+  const auto count_lines = [this]() {
+    std::size_t lines = 0;
+    for (const auto b : pop3_inbox_) {
+      if (b == std::byte{'\n'}) ++lines;
+    }
+    return lines;
+  };
+
+  if (pop3_client_) {
+    if (pop3_step_ == 0 && count_lines() >= 1) {
+      append_str(outbox_, "USER norr\r\n");
+      pop3_step_ = 1;
+      pop3_inbox_.clear();
+    }
+    if (pop3_step_ == 1 && count_lines() >= 1) {
+      append_str(outbox_, "PASS norr\r\n");
+      pop3_step_ = 2;
+      pop3_inbox_.clear();
+    }
+    if (pop3_step_ == 2 && count_lines() >= 1) {
+      pop3_ready_ = true;
+      pop3_inbox_.clear();
+    }
+  } else {
+    if (pop3_step_ == 0 && count_lines() >= 1) {
+      append_str(outbox_, "+OK\r\n");
+      pop3_step_ = 1;
+      pop3_inbox_.clear();
+    }
+    if (pop3_step_ == 1 && count_lines() >= 1) {
+      append_str(outbox_, "+OK logged in\r\n");
+      pop3_step_ = 2;
+      pop3_ready_ = true;
+      pop3_inbox_.clear();
+    }
+  }
+  if (!outbox_.empty()) static_cast<void>(flush_output());
+  return pop3_ready_;
 }
 
 std::expected<std::size_t, TransportError> TcpTransport::receive_frames(

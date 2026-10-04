@@ -167,7 +167,7 @@ std::expected<std::size_t, TransportError> IcmpCarrier::receive_batch(
 }
 
 bool TcpCarrier::connection_ready(const TcpTransport& conn) const noexcept {
-  return conn.connected() && conn.tls_established();
+  return conn.connected() && (pop3_ ? conn.pop3_established() : conn.tls_established());
 }
 
 std::size_t TcpCarrier::ready_count() const noexcept {
@@ -245,6 +245,22 @@ void TcpCarrier::drive(TcpTransport& transport, ConnectionSlot& slot, bool diali
   }
 
   if (!transport.connected()) return;
+
+  if (pop3_) {
+    if (!slot.started) {
+      if (transport.enable_pop3(dialing)) {
+        slot.started = true;
+      } else {
+        return;
+      }
+    }
+    if (!transport.pop3_established()) {
+      static_cast<void>(transport.poll_pop3());
+      return;
+    }
+    if (transport.has_pending_output()) static_cast<void>(transport.flush_output());
+    return;
+  }
 
   if (!slot.started) {
     const auto role = dialing ? TlsRole::client : TlsRole::server;
@@ -352,7 +368,7 @@ std::expected<std::size_t, TransportError> TcpCarrier::receive_batch(
   const auto drain = [&](TcpTransport& conn) {
     if (delivered >= out.size()) return;
     if (!conn.connected()) return;
-    if (!conn.tls_established()) return;
+    if (!(pop3_ ? conn.pop3_established() : conn.tls_established())) return;
     inbox_.resize(out.size() - delivered);
     const auto received = conn.receive_frames(inbox_);
     if (!received) {

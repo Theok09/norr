@@ -348,6 +348,7 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
     } else if (qualified == "transport.camouflage") {
       if (value == "off") config.camouflage = CamouflageMode::off;
       else if (value == "fake-tls") config.camouflage = CamouflageMode::fake_tls;
+      else if (value == "pop3") config.camouflage = CamouflageMode::pop3;
       else return fail(ConfigError::invalid_value);
     } else if (qualified == "transport.sni") {
       if (value.empty() || value.size() > 2048) return fail(ConfigError::invalid_value);

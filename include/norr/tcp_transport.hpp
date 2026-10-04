@@ -132,6 +132,14 @@ class TcpTransport {
 
   [[nodiscard]] std::expected<bool, TransportError> poll_camouflage();
 
+  [[nodiscard]] std::expected<void, TransportError> enable_pop3(bool client);
+
+  [[nodiscard]] bool pop3_enabled() const noexcept { return pop3_active_; }
+
+  [[nodiscard]] bool pop3_established() const noexcept { return pop3_ready_; }
+
+  [[nodiscard]] std::expected<bool, TransportError> poll_pop3();
+
   [[nodiscard]] std::expected<bool, TransportError> poll_connect();
 
   void close() noexcept;
@@ -172,6 +180,11 @@ class TcpTransport {
   std::optional<TlsSession> tls_;
   std::optional<CamouflageFramer> camo_;
   bool camo_ready_{};
+  bool pop3_active_{};
+  bool pop3_ready_{};
+  bool pop3_client_{};
+  std::size_t pop3_step_{};
+  std::vector<std::byte> pop3_inbox_;
   enum class RealityMode { off, client, server };
   RealityMode reality_mode_{RealityMode::off};
   PublicKey reality_server_public_{};
