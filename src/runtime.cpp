@@ -159,7 +159,16 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
     if (const auto current = tun_.mtu(); current) tunnel_mtu = *current;
   }
 
-  const auto bind_text = (config.network.ipv6 ? std::string{"[::]:"} : std::string{"0.0.0.0:"}) +
+  bool any_ipv6_peer = false;
+  for (const auto& entry : config.peers) {
+    if (const auto parsed = parse_endpoint(entry.endpoint);
+        parsed && parsed->address().family() == AddressFamily::ipv6) {
+      any_ipv6_peer = true;
+      break;
+    }
+  }
+  const bool bind_v6 = config.network.ipv6 && (any_ipv6_peer || config.peers.empty());
+  const auto bind_text = (bind_v6 ? std::string{"[::]:"} : std::string{"0.0.0.0:"}) +
                          std::to_string(config.listen_port);
   const auto bind_address = parse_endpoint(bind_text);
   if (!bind_address) {
