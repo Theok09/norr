@@ -47,6 +47,8 @@ inline constexpr auto kHandshakeRetryBase = std::chrono::milliseconds{500};
 inline constexpr auto kHandshakeRetryMax = std::chrono::seconds{30};
 inline constexpr auto kKeepaliveInterval = std::chrono::seconds{25};
 
+inline constexpr auto kTcpCarrierSilenceTimeout = std::chrono::seconds{75};
+
 inline constexpr auto kTransportCheckInterval = std::chrono::seconds{5};
 inline constexpr auto kTransportSettleTime = std::chrono::seconds{15};
 

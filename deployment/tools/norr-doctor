@@ -68,14 +68,14 @@ for s in norr1 norr2 norr3 norr4; do
 done
 
 hdr "transport reachability + latency (to peer 2053)"
-for t in udp camo icmp; do
+for t in tcp-tls udp camo icmp; do
   ip=${PEERIP[$t]}; ok_n=0; sum=0
   for i in 1 2 3 4 5; do
     t0=$(date +%s%N)
     if timeout 2 bash -c "echo >/dev/tcp/$ip/2053" 2>/dev/null; then
       t1=$(date +%s%N); ok_n=$((ok_n+1)); sum=$((sum+(t1-t0)/1000000)); fi
   done
-  if [ $ok_n -eq 0 ]; then warn "$t ($ip:2053) unreachable now"; \
+  if [ $ok_n -eq 0 ]; then bad "$t ($ip:2053) unreachable now"; \
   else avg=$((sum/ok_n)); loss=$(((5-ok_n)*20))
     [ $loss -gt 40 ] && warn "$t loss=${loss}% rtt=${avg}ms" || ok "$t loss=${loss}% rtt=${avg}ms"; fi
 done

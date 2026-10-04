@@ -182,6 +182,10 @@ class TcpCarrier final : public Carrier {
     extra_started_.push_back(false);
   }
 
+  void reset_all() noexcept;
+
+  void primary_replaced() noexcept { tls_started_ = false; }
+
   template <typename Fn>
   void for_each_descriptor(Fn&& fn) const {
     if (transport_->connected()) fn(transport_->descriptor());

@@ -2,6 +2,8 @@
 // Licensed under the GNU AGPL v3 or later. See LICENSE.
 #include "norr/carrier.hpp"
 
+#include <algorithm>
+
 #include <array>
 
 namespace norr {
@@ -214,6 +216,13 @@ void TcpCarrier::poll(Instant now) {
       }
     }
   }
+}
+
+void TcpCarrier::reset_all() noexcept {
+  transport_->close();
+  tls_started_ = false;
+  for (auto& conn : extra_) conn.close();
+  std::fill(extra_started_.begin(), extra_started_.end(), false);
 }
 
 std::expected<std::size_t, TransportError> TcpCarrier::send_batch(

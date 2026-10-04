@@ -163,6 +163,8 @@ class Runtime {
   std::atomic<bool> reload_requested_{false};
   bool tcp_ready_{};
   Instant tcp_accepted_at_{};
+  Instant tcp_ready_since_{};
+  std::uint64_t tcp_silence_resets_{};
   bool quic_ready_{};
   Endpoint reality_cover_{};
   bool reality_cover_valid_{};

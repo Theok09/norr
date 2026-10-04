@@ -790,6 +790,7 @@ void Runtime::service_tcp_carrier(Instant now) {
       tcp_ = std::move(**incoming);
       tcp_.set_mark(fwmark_);
       tcp_accepted_at_ = now;
+      if (tcp_carrier != nullptr) tcp_carrier->primary_replaced();
     }
   }
 
@@ -846,7 +847,27 @@ void Runtime::service_tcp_carrier(Instant now) {
   }
 
   if (tcp_ready_ && !was_ready) {
+    tcp_ready_since_ = now;
     static_cast<void>(dial_configured_peers());
+  }
+
+  if (tcp_carrier != nullptr && tcp_ready_ && !tcp_listener_.listening() &&
+      tcp_ready_since_ != Instant{}) {
+    auto heard = tcp_ready_since_;
+    for (PeerId peer = 1; peer <= peer_count_; ++peer) {
+      auto session = sessions_.find_by_peer(peer);
+      if (session != nullptr && session->has_received()) {
+        heard = std::max(heard, session->last_received());
+      }
+    }
+    if (now - heard > kTcpCarrierSilenceTimeout) {
+      tcp_carrier->reset_all();
+      tcp_ready_ = false;
+      tcp_ready_since_ = Instant{};
+      ++tcp_silence_resets_;
+      std::fprintf(stderr, "tcp carrier: peer silent, reconnecting\n");
+      std::fflush(stderr);
+    }
   }
 }
 

@@ -228,6 +228,27 @@ std::expected<std::uint16_t, TransportError> TcpListener::local_port() const {
 
 #else
 
+namespace {
+void apply_liveness(int descriptor) noexcept {
+  const int enable = 1;
+  static_cast<void>(::setsockopt(descriptor, SOL_SOCKET, SO_KEEPALIVE, &enable, sizeof(enable)));
+#if defined(TCP_KEEPIDLE) && defined(TCP_KEEPINTVL) && defined(TCP_KEEPCNT)
+  const int idle = 20;
+  const int interval = 5;
+  const int count = 4;
+  static_cast<void>(::setsockopt(descriptor, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle)));
+  static_cast<void>(
+      ::setsockopt(descriptor, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval)));
+  static_cast<void>(::setsockopt(descriptor, IPPROTO_TCP, TCP_KEEPCNT, &count, sizeof(count)));
+#endif
+#if defined(TCP_USER_TIMEOUT)
+  const unsigned int user_timeout = 45000;
+  static_cast<void>(::setsockopt(descriptor, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout,
+                                 sizeof(user_timeout)));
+#endif
+}
+}
+
 std::expected<void, TransportError> TcpTransport::connect(const Endpoint& peer) {
   if (state_ == TcpState::connected || state_ == TcpState::connecting) {
     return std::unexpected(TransportError::already_started);
@@ -246,6 +267,7 @@ std::expected<void, TransportError> TcpTransport::connect(const Endpoint& peer) 
   static_cast<void>(
       ::setsockopt(descriptor.get(), IPPROTO_TCP, TCP_NOTSENT_LOWAT, &lowat, sizeof(lowat)));
 #endif
+  apply_liveness(descriptor.get());
   if (!set_non_blocking(descriptor.get())) {
     return std::unexpected(TransportError::socket_option_failed);
   }
@@ -613,6 +635,7 @@ std::expected<std::optional<TcpTransport>, TransportError> TcpListener::accept()
 
   const int enable = 1;
   static_cast<void>(::setsockopt(descriptor, IPPROTO_TCP, TCP_NODELAY, &enable, sizeof(enable)));
+  apply_liveness(descriptor);
 #if defined(TCP_NOTSENT_LOWAT)
   const int lowat = kTcpNotSentLowat;
   static_cast<void>(::setsockopt(descriptor, IPPROTO_TCP, TCP_NOTSENT_LOWAT, &lowat, sizeof(lowat)));
