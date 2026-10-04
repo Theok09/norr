@@ -14,7 +14,5 @@ core.*
 
 /dist/
 
-scripts/e2e_*.sh
-bench/
 fuzz/
 /.release/
