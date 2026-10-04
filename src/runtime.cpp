@@ -386,7 +386,20 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
                      "collide with the tunnel\n");
       }
     }
-    if (const auto ok = icmp_transport_.start(*bind_address, role); !ok) {
+    bool icmp_v6 = false;
+    if (partner->endpoint.has_value()) {
+      icmp_v6 = partner->endpoint->family() == AddressFamily::ipv6;
+    } else {
+      for (const auto& prefix : config.network.addresses) {
+        if (const auto own = parse_prefix(prefix); own) {
+          icmp_v6 = own->address().family() == AddressFamily::ipv6;
+          break;
+        }
+      }
+    }
+    const auto icmp_addr = parse_address(icmp_v6 ? "::" : "0.0.0.0");
+    if (!icmp_addr) return std::unexpected(Diagnostic{RuntimeError::bind_failed, "icmp"});
+    if (const auto ok = icmp_transport_.start(Endpoint{*icmp_addr, 0}, role); !ok) {
       return std::unexpected(Diagnostic{RuntimeError::bind_failed,
                                         std::string{transport_error_message(ok.error())}});
     }

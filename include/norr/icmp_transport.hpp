@@ -15,6 +15,8 @@
 namespace norr {
 inline constexpr std::uint8_t kIcmpEchoRequest = 8;
 inline constexpr std::uint8_t kIcmpEchoReply = 0;
+inline constexpr std::uint8_t kIcmp6EchoRequest = 128;
+inline constexpr std::uint8_t kIcmp6EchoReply = 129;
 inline constexpr std::size_t kIcmpHeaderSize = 8;
 inline constexpr std::uint16_t kNorrIcmpId = 0x4E52;
 
@@ -71,6 +73,7 @@ class IcmpTransport {
  private:
   FileDescriptor socket_;
   [[maybe_unused]] Role role_{Role::client};
+  [[maybe_unused]] AddressFamily family_{AddressFamily::ipv4};
   [[maybe_unused]] std::uint16_t identifier_{kNorrIcmpId};
   [[maybe_unused]] std::uint16_t sequence_{};
   TransportStats stats_{};

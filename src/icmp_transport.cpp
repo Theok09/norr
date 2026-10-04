@@ -108,7 +108,10 @@ bool IcmpTransport::supported() noexcept { return true; }
 
 std::expected<void, TransportError> IcmpTransport::start(const Endpoint& bind_address, Role role) {
   if (socket_.valid()) return std::unexpected(TransportError::already_started);
-  FileDescriptor descriptor{::socket(AF_INET, SOCK_RAW | SOCK_CLOEXEC, IPPROTO_ICMP)};
+  const bool v6 = bind_address.family() == AddressFamily::ipv6;
+  const int domain = v6 ? AF_INET6 : AF_INET;
+  const int proto = v6 ? static_cast<int>(IPPROTO_ICMPV6) : static_cast<int>(IPPROTO_ICMP);
+  FileDescriptor descriptor{::socket(domain, SOCK_RAW | SOCK_CLOEXEC, proto)};
   if (!descriptor) return std::unexpected(TransportError::socket_creation_failed);
 
   const auto flags = ::fcntl(descriptor.get(), F_GETFL, 0);
@@ -116,7 +119,7 @@ std::expected<void, TransportError> IcmpTransport::start(const Endpoint& bind_ad
     return std::unexpected(TransportError::socket_option_failed);
   }
 
-  static_cast<void>(bind_address);
+  family_ = v6 ? AddressFamily::ipv6 : AddressFamily::ipv4;
   socket_ = std::move(descriptor);
   role_ = role;
   scratch_.resize(kIcmpHeaderSize + kDefaultDatagramSize);
@@ -136,10 +139,20 @@ std::expected<void, TransportError> IcmpTransport::set_mark(std::uint32_t mark) 
 std::expected<std::size_t, TransportError> IcmpTransport::send_batch(
     std::span<const OutboundDatagram> datagrams) {
   if (!socket_.valid()) return std::unexpected(TransportError::not_started);
-  const std::uint8_t type = role_ == Role::client ? kIcmpEchoRequest : kIcmpEchoReply;
+  const bool v6 = family_ == AddressFamily::ipv6;
+  std::uint8_t type;
+  if (v6) {
+    type = role_ == Role::client ? kIcmp6EchoRequest : kIcmp6EchoReply;
+  } else {
+    type = role_ == Role::client ? kIcmpEchoRequest : kIcmpEchoReply;
+  }
 
   std::size_t sent = 0;
   for (const auto& datagram : datagrams) {
+    if (datagram.destination.family() != family_) {
+      ++stats_.tx_errors;
+      continue;
+    }
     const auto needed = kIcmpHeaderSize + datagram.payload.size();
     if (scratch_.size() < needed) scratch_.resize(needed);
     const auto framed = build_icmp_echo(type, identifier_, sequence_++, datagram.payload, scratch_);
@@ -147,17 +160,28 @@ std::expected<std::size_t, TransportError> IcmpTransport::send_batch(
       ++stats_.tx_errors;
       continue;
     }
-    if (datagram.destination.family() != AddressFamily::ipv4) {
-      ++stats_.tx_errors;
-      continue;
+    if (v6) {
+      scratch_[2] = std::byte{0};
+      scratch_[3] = std::byte{0};
     }
-    sockaddr_in dest{};
-    dest.sin_family = AF_INET;
     const auto octets = datagram.destination.address().bytes();
-    std::memcpy(&dest.sin_addr.s_addr, octets.data(), 4);
+
+    sockaddr_storage storage{};
+    socklen_t length;
+    if (v6) {
+      auto* dest = reinterpret_cast<sockaddr_in6*>(&storage);
+      dest->sin6_family = AF_INET6;
+      std::memcpy(&dest->sin6_addr, octets.data(), 16);
+      length = sizeof(sockaddr_in6);
+    } else {
+      auto* dest = reinterpret_cast<sockaddr_in*>(&storage);
+      dest->sin_family = AF_INET;
+      std::memcpy(&dest->sin_addr.s_addr, octets.data(), 4);
+      length = sizeof(sockaddr_in);
+    }
 
     const auto result = ::sendto(socket_.get(), scratch_.data(), framed, MSG_NOSIGNAL,
-                                 reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
+                                 reinterpret_cast<const sockaddr*>(&storage), length);
     if (result < 0) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) break;
       ++stats_.tx_errors;
@@ -176,13 +200,19 @@ std::expected<std::size_t, TransportError> IcmpTransport::receive_batch(
   if (!socket_.valid()) return std::unexpected(TransportError::not_started);
   if (out.empty()) return std::size_t{0};
 
-  const std::uint8_t want = role_ == Role::client ? kIcmpEchoReply : kIcmpEchoRequest;
+  const bool v6 = family_ == AddressFamily::ipv6;
+  std::uint8_t want;
+  if (v6) {
+    want = role_ == Role::client ? kIcmp6EchoReply : kIcmp6EchoRequest;
+  } else {
+    want = role_ == Role::client ? kIcmpEchoReply : kIcmpEchoRequest;
+  }
   std::size_t received = 0;
   const auto limit = std::min(out.size(), buffers.count());
 
   while (received < limit) {
     auto slot = buffers.slot(received);
-    sockaddr_in from{};
+    sockaddr_storage from{};
     socklen_t from_len = sizeof(from);
     const auto got = ::recvfrom(socket_.get(), slot.data(), slot.size(), 0,
                                 reinterpret_cast<sockaddr*>(&from), &from_len);
@@ -192,16 +222,23 @@ std::expected<std::size_t, TransportError> IcmpTransport::receive_batch(
       ++stats_.rx_errors;
       break;
     }
-    const auto view = parse_icmp_echo(slot.first(static_cast<std::size_t>(got)), true);
+    const auto view = parse_icmp_echo(slot.first(static_cast<std::size_t>(got)), !v6);
     if (!view) {
       ++stats_.rx_errors;
       continue;
     }
     if (view->type != want || view->identifier != identifier_) continue;
 
-    std::array<std::byte, 4> ipv4{};
-    std::memcpy(ipv4.data(), &from.sin_addr.s_addr, 4);
-    const auto source = Address::from_bytes(AddressFamily::ipv4, ipv4);
+    Address source;
+    if (v6) {
+      std::array<std::byte, 16> raw{};
+      std::memcpy(raw.data(), &reinterpret_cast<sockaddr_in6*>(&from)->sin6_addr, 16);
+      source = Address::from_bytes(AddressFamily::ipv6, raw);
+    } else {
+      std::array<std::byte, 4> raw{};
+      std::memcpy(raw.data(), &reinterpret_cast<sockaddr_in*>(&from)->sin_addr.s_addr, 4);
+      source = Address::from_bytes(AddressFamily::ipv4, raw);
+    }
 
     out[received] = InboundDatagram{.source = Endpoint{source, 0}, .payload = view->payload};
     ++received;

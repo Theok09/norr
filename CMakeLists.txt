@@ -73,6 +73,7 @@ add_library(norr_core
     src/runtime.cpp
     src/routing.cpp
     src/session.cpp
+    src/spooftest.cpp
     src/timers.cpp
     src/tls.cpp
     src/tun.cpp
@@ -262,6 +263,10 @@ if(NORR_BUILD_TESTS)
     add_executable(norr_crypto_tests tests/crypto_test.cpp)
     target_link_libraries(norr_crypto_tests PRIVATE norr_core tests_support)
     add_test(NAME norr_crypto_tests COMMAND norr_crypto_tests)
+    add_executable(norr_spooftest_tests tests/spooftest_test.cpp)
+    target_link_libraries(norr_spooftest_tests PRIVATE norr_core tests_support)
+    add_test(NAME norr_spooftest_tests COMMAND norr_spooftest_tests)
+
     add_executable(norr_session_tests tests/session_test.cpp)
     target_link_libraries(norr_session_tests PRIVATE norr_core tests_support)
     add_test(NAME norr_session_tests COMMAND norr_session_tests)
@@ -383,6 +388,13 @@ if(NORR_BUILD_TESTS)
         set_tests_properties(norr_e2e_fec PROPERTIES
             SKIP_RETURN_CODE 77
             TIMEOUT 180)
+
+        add_test(NAME norr_e2e_icmp6
+                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norrd>
+                         bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_icmp6.sh)
+        set_tests_properties(norr_e2e_icmp6 PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 120)
 
         add_test(NAME norr_e2e_ipv6
                  COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norrd>
