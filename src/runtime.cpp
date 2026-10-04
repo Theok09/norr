@@ -430,18 +430,13 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
       if (config.role == NodeRole::client) udp_carrier_->prime();
     }
     if (config.spoof_enabled) {
-      if (!SpoofSender::supported()) {
-        return std::unexpected(Diagnostic{RuntimeError::option_not_implemented,
-                                          "transport.spoof needs the Linux raw-socket backend"});
-      }
-      const auto local = transport_.local_port();
-      const std::uint16_t source_port = local.has_value() ? *local : config.listen_port;
-      udp_carrier_->configure_spoofing(config.spoof_sources, source_port);
-      if (!udp_carrier_->spoofing()) {
-        return std::unexpected(Diagnostic{
-            RuntimeError::option_not_implemented,
-            "transport.spoof could not open a raw socket (needs CAP_NET_RAW or root)"});
-      }
+      return std::unexpected(Diagnostic{
+          RuntimeError::option_not_implemented,
+          "transport.spoof is not yet usable: spoofing the source breaks the Noise handshake "
+          "return path (the peer replies to the forged source), and silent fail-open to the real "
+          "source would de-anonymize the sender. The source-rotation engine is built and tested "
+          "but stays disabled until the session layer keeps the handshake on the real source and "
+          "only spoofs established data frames."});
     }
     carrier_ = udp_carrier_.get();
     active_kind_ = TransportKind::udp;
