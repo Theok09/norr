@@ -412,6 +412,14 @@ if(NORR_BUILD_TESTS)
             SKIP_RETURN_CODE 77
             TIMEOUT 120)
 
+        add_test(NAME norr_e2e_cli
+                 COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norrd>
+                         CLI=${CMAKE_CURRENT_SOURCE_DIR}/scripts/norr
+                         bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_cli.sh)
+        set_tests_properties(norr_e2e_cli PROPERTIES
+            SKIP_RETURN_CODE 77
+            TIMEOUT 180)
+
         add_test(NAME norr_e2e_tcp_hygiene
                  COMMAND ${CMAKE_COMMAND} -E env NORR=$<TARGET_FILE:norrd>
                          bash ${CMAKE_CURRENT_SOURCE_DIR}/scripts/e2e_tcp_hygiene.sh)
