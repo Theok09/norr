@@ -48,6 +48,9 @@ mkdir -p "$OUT/$name"
 cp norr-build/norrd "$OUT/$name/norrd"
 cp "$SOURCE/scripts/norr" "$SOURCE/scripts/norr-quick" "$OUT/$name/"
 cp "$SOURCE/deployment/systemd/norr@.service" "$OUT/$name/"
+cp "$SOURCE/deployment/tools/norr-doctor" "$OUT/$name/"
+cp "$SOURCE/deployment/failover/norr-failover" "$SOURCE/deployment/failover/norr-failover.service" \
+  "$SOURCE/deployment/failover/norr-failover.timer" "$OUT/$name/"
 cp "$SOURCE/LICENSE" "$OUT/$name/"
 tar -C "$OUT" -czf "$OUT/$name.tar.gz" "$name"
 (cd "$OUT" && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
