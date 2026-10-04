@@ -55,6 +55,59 @@ void test_full_roundtrip() {
   std::puts("obfuscation: full mode round-trips with random junk OK");
 }
 
+void test_padding_persists_past_window() {
+  const auto psk = make_psk(std::byte{0x5C});
+  norr::Obfuscator sender;
+  norr::Obfuscator receiver;
+  norr::ObfuscationConfig config{.mode = norr::ObfuscationMode::full,
+                                 .junk_padding = true,
+                                 .priming = false,
+                                 .junk_max = 200,
+                                 .length_bucket = 256};
+  sender.configure(config, psk);
+  receiver.configure(config, psk);
+
+  const auto plaintext = sample_data_packet();
+  std::size_t padded_packets = 0;
+  for (int trial = 0; trial < 1000; ++trial) {
+    std::vector<std::byte> wire(plaintext.size() + sender.max_overhead());
+    const auto wrapped = sender.wrap(plaintext, wire);
+    NORR_CHECK(wrapped.has_value());
+    const auto body = *wrapped - norr::kObfuscationNonceSize;
+    if (body > plaintext.size() + 1) ++padded_packets;
+
+    std::vector<std::byte> out(*wrapped);
+    const auto unwrapped = receiver.unwrap(std::span{wire}.first(*wrapped), out);
+    NORR_CHECK(unwrapped.has_value());
+    NORR_CHECK(*unwrapped == plaintext.size());
+  }
+  NORR_CHECK(padded_packets > 900);
+  std::puts("obfuscation: padding applies on every packet past the old 64-packet window OK");
+}
+
+void test_length_bucketing() {
+  const auto psk = make_psk(std::byte{0x7E});
+  norr::Obfuscator sender;
+  norr::ObfuscationConfig config{.mode = norr::ObfuscationMode::full,
+                                 .junk_padding = true,
+                                 .priming = false,
+                                 .junk_max = 255,
+                                 .length_bucket = 64};
+  sender.configure(config, psk);
+
+  const std::vector<std::byte> small(40, std::byte{0x11});
+  bool saw_bucket_aligned = false;
+  for (int trial = 0; trial < 500; ++trial) {
+    std::vector<std::byte> wire(small.size() + sender.max_overhead());
+    const auto wrapped = sender.wrap(small, wire);
+    NORR_CHECK(wrapped.has_value());
+    const auto body = *wrapped - norr::kObfuscationNonceSize;
+    if (body % 64 == 0) saw_bucket_aligned = true;
+  }
+  NORR_CHECK(saw_bucket_aligned);
+  std::puts("obfuscation: small payloads land on length buckets OK");
+}
+
 void test_header_mask_roundtrip() {
   const auto psk = make_psk(std::byte{0x11});
   norr::Obfuscator sender;
@@ -144,6 +197,8 @@ int main() {
   NORR_CHECK(norr::crypto_init().has_value());
 
   test_full_roundtrip();
+  test_padding_persists_past_window();
+  test_length_bucketing();
   test_header_mask_roundtrip();
   test_wrong_key_does_not_recover();
   test_priming_is_random_sized();

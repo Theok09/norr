@@ -71,12 +71,12 @@ struct ObfuscationConfig {
   bool junk_padding{false};
   bool priming{false};
   std::uint8_t junk_max{64};
+  std::uint16_t length_bucket{256};
 };
 
 [[nodiscard]] ObfuscationKey derive_obfuscation_key(
     const PresharedKey& preshared) noexcept;
 
-inline constexpr std::uint64_t kJunkPacketWindow = 64;
 
 class Obfuscator {
  public:
