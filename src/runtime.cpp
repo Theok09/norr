@@ -317,6 +317,12 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
             ? std::uint8_t{1}
             : config.tcp_connections);
     if (camouflaged) {
+      if (!config.reality_private_key.empty() || !config.reality_public_key.empty()) {
+        return std::unexpected(Diagnostic{
+            RuntimeError::option_not_implemented,
+            "REALITY is not supported on the camouflage carrier: it now speaks real TLS 1.3, "
+            "which cannot carry the REALITY handshake. Remove the reality keys or the camouflage."});
+      }
       tcp_carrier_->set_camouflage(config.camouflage_sni);
       if (!config.camouflage_sni_pool.empty()) {
         tcp_carrier_->set_sni_pool(config.camouflage_sni_pool);
@@ -328,29 +334,6 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
         if (camo_obfuscation.junk_max == 0) camo_obfuscation.junk_max = 96;
       }
       tcp_carrier_->configure_obfuscation(camo_obfuscation, partner->preshared);
-      if (config.role == NodeRole::server && !config.reality_private_key.empty()) {
-        PrivateKey reality_priv{};
-        if (decode_hex(config.reality_private_key, reality_priv)) {
-          tcp_carrier_->set_reality_server(reality_priv, 120);
-          reality_server_ = true;
-          reality_server_priv_ = reality_priv;
-          reality_window_ = 120;
-          reality_sni_ = config.camouflage_sni;
-          if (!config.reality_cover.empty()) {
-            if (auto cover = resolve_cover(config.reality_cover); cover.has_value()) {
-              reality_cover_ = *cover;
-              reality_cover_valid_ = true;
-            }
-          }
-        }
-      } else if (!config.reality_public_key.empty() && !config.reality_short_id.empty()) {
-        PublicKey reality_pub{};
-        RealityShortId reality_sid{};
-        if (decode_hex(config.reality_public_key, reality_pub) &&
-            decode_hex(config.reality_short_id, reality_sid)) {
-          tcp_carrier_->set_reality_client(reality_pub, reality_sid);
-        }
-      }
     }
     carrier_ = tcp_carrier_.get();
     active_kind_ = TransportKind::tcp_tls;
@@ -465,6 +448,12 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
             ? std::uint8_t{1}
             : config.tcp_connections);
       if (camouflaged) {
+      if (!config.reality_private_key.empty() || !config.reality_public_key.empty()) {
+        return std::unexpected(Diagnostic{
+            RuntimeError::option_not_implemented,
+            "REALITY is not supported on the camouflage carrier: it now speaks real TLS 1.3, "
+            "which cannot carry the REALITY handshake. Remove the reality keys or the camouflage."});
+      }
       tcp_carrier_->set_camouflage(config.camouflage_sni);
       if (!config.camouflage_sni_pool.empty()) {
         tcp_carrier_->set_sni_pool(config.camouflage_sni_pool);
@@ -476,29 +465,6 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
         if (camo_obfuscation.junk_max == 0) camo_obfuscation.junk_max = 96;
       }
       tcp_carrier_->configure_obfuscation(camo_obfuscation, partner->preshared);
-      if (config.role == NodeRole::server && !config.reality_private_key.empty()) {
-        PrivateKey reality_priv{};
-        if (decode_hex(config.reality_private_key, reality_priv)) {
-          tcp_carrier_->set_reality_server(reality_priv, 120);
-          reality_server_ = true;
-          reality_server_priv_ = reality_priv;
-          reality_window_ = 120;
-          reality_sni_ = config.camouflage_sni;
-          if (!config.reality_cover.empty()) {
-            if (auto cover = resolve_cover(config.reality_cover); cover.has_value()) {
-              reality_cover_ = *cover;
-              reality_cover_valid_ = true;
-            }
-          }
-        }
-      } else if (!config.reality_public_key.empty() && !config.reality_short_id.empty()) {
-        PublicKey reality_pub{};
-        RealityShortId reality_sid{};
-        if (decode_hex(config.reality_public_key, reality_pub) &&
-            decode_hex(config.reality_short_id, reality_sid)) {
-          tcp_carrier_->set_reality_client(reality_pub, reality_sid);
-        }
-      }
     }
       paths_.add_path(TransportKind::tcp_tls);
     }
