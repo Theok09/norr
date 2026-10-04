@@ -108,6 +108,8 @@ struct Config {
   std::uint64_t qos_burst_bytes{};
   FecMode fec{FecMode::off};
   ObfuscationConfig obfuscation{};
+  bool spoof_enabled{false};
+  std::vector<std::uint32_t> spoof_sources;
   TrafficProfile profile{TrafficProfile::standard};
   bool metrics_enabled{false};
   std::string metrics_listen;

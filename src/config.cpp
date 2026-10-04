@@ -326,6 +326,25 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       const auto flag = parse_bool(value);
       if (!flag) return fail(flag.error());
       config.obfuscation.priming = *flag;
+    } else if (qualified == "transport.spoof") {
+      const auto flag = parse_bool(value);
+      if (!flag) return fail(flag.error());
+      config.spoof_enabled = *flag;
+    } else if (qualified == "transport.spoof_sources") {
+      config.spoof_sources.clear();
+      for (const auto part : split_list(value)) {
+        const auto parsed = parse_address(part);
+        if (!parsed || parsed->family() != AddressFamily::ipv4) {
+          return fail(ConfigError::invalid_value);
+        }
+        const auto octets = parsed->bytes();
+        const auto be = (static_cast<std::uint32_t>(octets[0]) << 24U) |
+                        (static_cast<std::uint32_t>(octets[1]) << 16U) |
+                        (static_cast<std::uint32_t>(octets[2]) << 8U) |
+                        static_cast<std::uint32_t>(octets[3]);
+        if (be != 0) config.spoof_sources.push_back(be);
+      }
+      if (config.spoof_sources.empty()) return fail(ConfigError::invalid_value);
     } else if (qualified == "transport.camouflage") {
       if (value == "off") config.camouflage = CamouflageMode::off;
       else if (value == "fake-tls") config.camouflage = CamouflageMode::fake_tls;
@@ -447,6 +466,19 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
   if (!config.metrics_enabled && !config.metrics_listen.empty()) {
     return std::unexpected(Diagnostic{ConfigError::incompatible_options, 0,
                                       "observability.listen without observability.metrics"});
+  }
+
+  if (config.spoof_enabled && config.spoof_sources.empty()) {
+    return std::unexpected(Diagnostic{ConfigError::missing_required, 0, "transport.spoof_sources"});
+  }
+  if (!config.spoof_enabled && !config.spoof_sources.empty()) {
+    return std::unexpected(Diagnostic{ConfigError::incompatible_options, 0,
+                                      "transport.spoof_sources without transport.spoof"});
+  }
+  if (config.spoof_enabled && config.transport != TransportMode::automatic &&
+      config.transport != TransportMode::udp) {
+    return std::unexpected(Diagnostic{ConfigError::incompatible_options, 0,
+                                      "transport.spoof applies to the udp transport"});
   }
 
   if (!config.network.ipv4 && !config.network.ipv6) {

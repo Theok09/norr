@@ -234,4 +234,29 @@ allowed_ips = "10.80.0.3/32"
 
   const auto missing = norr::load_config_file("/nonexistent/norr/does-not-exist.toml");
   NORR_CHECK(!missing.has_value() && missing.error().error == norr::ConfigError::unreadable_file);
+
+  const auto spoof = norr::parse_config(
+      "[node]\nlisten_port = 1\n[identity]\nkey_file = \"k\"\n"
+      "[transport]\nmode = \"udp\"\nspoof = true\n"
+      "spoof_sources = \"1.2.3.4, 5.6.7.8\"\n");
+  NORR_CHECK(spoof.has_value());
+  NORR_CHECK(spoof->spoof_enabled);
+  NORR_CHECK(spoof->spoof_sources.size() == 2);
+  NORR_CHECK(spoof->spoof_sources[0] == 0x01020304U);
+  NORR_CHECK(spoof->spoof_sources[1] == 0x05060708U);
+
+  NORR_CHECK(error_of("[node]\nlisten_port = 1\n[identity]\nkey_file = \"k\"\n"
+                      "[transport]\nmode = \"udp\"\nspoof = true\n") ==
+             norr::ConfigError::missing_required);
+  NORR_CHECK(error_of("[node]\nlisten_port = 1\n[identity]\nkey_file = \"k\"\n"
+                      "[transport]\nspoof_sources = \"1.2.3.4\"\n") ==
+             norr::ConfigError::incompatible_options);
+  NORR_CHECK(error_of("[node]\nlisten_port = 1\n[identity]\nkey_file = \"k\"\n"
+                      "[transport]\nmode = \"tcp-tls\"\nspoof = true\n"
+                      "spoof_sources = \"1.2.3.4\"\n") ==
+             norr::ConfigError::incompatible_options);
+  NORR_CHECK(error_of("[node]\nlisten_port = 1\n[identity]\nkey_file = \"k\"\n"
+                      "[transport]\nmode = \"udp\"\nspoof = true\n"
+                      "spoof_sources = \"not-an-ip\"\n") ==
+             norr::ConfigError::invalid_value);
 }
