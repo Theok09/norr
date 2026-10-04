@@ -93,7 +93,7 @@ std::vector<std::uint64_t> decode_spoof_receipt(std::span<const std::byte> paylo
   std::vector<std::uint64_t> bitmap;
   if (payload.empty() || payload[0] != kSpoofReceipt) return bitmap;
   const auto body = payload.subspan(1);
-  const auto words = body.size() / 8;
+  const auto words = std::min<std::size_t>(body.size() / 8, kSpoofReceiptMaxWords);
   bitmap.reserve(words);
   for (std::size_t w = 0; w < words; ++w) {
     std::uint64_t value = 0;

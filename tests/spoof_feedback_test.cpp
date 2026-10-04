@@ -118,6 +118,14 @@ void test_receipt_frame_rejects_bad_tag() {
   std::puts("spoof_feedback: receipt decode rejects wrong tag and empty OK");
 }
 
+void test_receipt_decode_caps_words() {
+  std::vector<std::byte> huge(1 + 4096 * 8, std::byte{0xFF});
+  huge[0] = norr::kSpoofReceipt;
+  const auto decoded = norr::decode_spoof_receipt(huge);
+  NORR_CHECK(decoded.size() <= norr::kSpoofReceiptMaxWords);
+  std::puts("spoof_feedback: receipt decode caps words against oversized frame OK");
+}
+
 void test_randomized_feedback_loop() {
   norr::SpoofFeedback fb{pool_of(12), {.miss_windows = 3,
                                        .reroll_interval = std::chrono::seconds{5}}};
@@ -154,6 +162,7 @@ int main() {
   test_no_reroll_pins_flow();
   test_receipt_frame_roundtrip();
   test_receipt_frame_rejects_bad_tag();
+  test_receipt_decode_caps_words();
   test_randomized_feedback_loop();
   std::puts("spoof_feedback: all tests passed");
   return 0;
