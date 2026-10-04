@@ -646,74 +646,88 @@ std::expected<std::size_t, TransportError> TcpTransport::receive_frames(
     return n;
   }
 
-  while (true) {
-    ssize_t received = 0;
-    bool drained = false;
-    bool closed = false;
-
-    if (tls_.has_value()) {
-      if (!tls_->established()) return std::unexpected(TransportError::not_started);
-      const auto got = tls_->receive(read_buffer_);
-      if (!got) {
-        if (got.error() == TlsError::closed) {
-          closed = true;
-        } else if (got.error() == TlsError::handshake_pending) {
-          drained = true;
-        } else {
-          state_ = TcpState::failed;
-          return std::unexpected(TransportError::receive_failed);
-        }
-      } else if (*got == 0) {
-        drained = true;
-      } else {
-        received = static_cast<ssize_t>(*got);
-      }
-    } else {
-      received = ::read(socket_.get(), read_buffer_.data(), read_buffer_.size());
-      if (received == 0) {
-        closed = true;
-      } else if (received < 0) {
-        if (errno == EINTR) continue;
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-          drained = true;
-        } else {
-          state_ = TcpState::failed;
-          return std::unexpected(TransportError::receive_failed);
-        }
-      }
+  const auto fill_ready = [&]() {
+    while (ready_.size() < out.size()) {
+      const auto frame = reassembler_.next();
+      if (reassembler_.violated()) return false;
+      if (frame.empty()) break;
+      ready_.emplace_back(frame.begin(), frame.end());
     }
+    return true;
+  };
 
-    if (closed) {
-      state_ = TcpState::failed;
-      ++stats_.disconnects;
-      break;
-    }
-    if (drained) break;
-
-    if (!reassembler_.push(std::span{read_buffer_}.first(static_cast<std::size_t>(received)))) {
-      state_ = TcpState::failed;
-      return std::unexpected(TransportError::receive_failed);
-    }
-    stats_.bytes_received += static_cast<std::uint64_t>(received);
-  }
-
-  ready_.clear();
-  while (ready_.size() < out.size()) {
-    const auto frame = reassembler_.next();
-    if (reassembler_.violated()) {
+  if (ready_head_ >= ready_.size()) {
+    ready_.clear();
+    ready_head_ = 0;
+    if (!fill_ready()) {
       ++stats_.oversized_rejected;
       state_ = TcpState::failed;
       return std::unexpected(TransportError::message_too_large);
     }
-    if (frame.empty()) break;
-    ready_.emplace_back(frame.begin(), frame.end());
+    while (ready_.size() < out.size()) {
+      ssize_t received = 0;
+      bool drained = false;
+      bool closed = false;
+
+      if (tls_.has_value()) {
+        if (!tls_->established()) return std::unexpected(TransportError::not_started);
+        const auto got = tls_->receive(read_buffer_);
+        if (!got) {
+          if (got.error() == TlsError::closed) {
+            closed = true;
+          } else if (got.error() == TlsError::handshake_pending) {
+            drained = true;
+          } else {
+            state_ = TcpState::failed;
+            return std::unexpected(TransportError::receive_failed);
+          }
+        } else if (*got == 0) {
+          drained = true;
+        } else {
+          received = static_cast<ssize_t>(*got);
+        }
+      } else {
+        received = ::read(socket_.get(), read_buffer_.data(), read_buffer_.size());
+        if (received == 0) {
+          closed = true;
+        } else if (received < 0) {
+          if (errno == EINTR) continue;
+          if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            drained = true;
+          } else {
+            state_ = TcpState::failed;
+            return std::unexpected(TransportError::receive_failed);
+          }
+        }
+      }
+
+      if (closed) {
+        state_ = TcpState::failed;
+        ++stats_.disconnects;
+        break;
+      }
+      if (drained) break;
+
+      if (!reassembler_.push(std::span{read_buffer_}.first(static_cast<std::size_t>(received)))) {
+        state_ = TcpState::failed;
+        return std::unexpected(TransportError::receive_failed);
+      }
+      stats_.bytes_received += static_cast<std::uint64_t>(received);
+
+      if (!fill_ready()) {
+        ++stats_.oversized_rejected;
+        state_ = TcpState::failed;
+        return std::unexpected(TransportError::message_too_large);
+      }
+    }
   }
 
-  for (std::size_t index = 0; index < ready_.size(); ++index) {
-    out[index] = ready_[index];
+  std::size_t n = 0;
+  while (n < out.size() && ready_head_ < ready_.size()) {
+    out[n++] = ready_[ready_head_++];
   }
-  stats_.frames_received += ready_.size();
-  return ready_.size();
+  stats_.frames_received += n;
+  return n;
 }
 
 std::expected<void, TransportError> TcpListener::listen(const Endpoint& bind_address, int backlog) {
