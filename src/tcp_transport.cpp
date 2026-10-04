@@ -527,12 +527,20 @@ std::expected<bool, TransportError> TcpTransport::poll_pop3() {
     if (!outbox_.empty()) return false;
   }
 
-  std::array<std::byte, 512> buf{};
+  const auto lines_needed = pop3_client_ ? pop3_step_ + 1 : pop3_step_ + 1;
+  std::byte one{};
   while (true) {
-    const auto got = ::recv(socket_.get(), buf.data(), buf.size(), 0);
+    auto have_lines = [this]() {
+      std::size_t n = 0;
+      for (const auto b : pop3_inbox_) {
+        if (b == std::byte{'\n'}) ++n;
+      }
+      return n;
+    };
+    if (have_lines() >= lines_needed) break;
+    const auto got = ::recv(socket_.get(), &one, 1, 0);
     if (got > 0) {
-      pop3_inbox_.insert(pop3_inbox_.end(), buf.begin(),
-                         buf.begin() + static_cast<std::ptrdiff_t>(got));
+      pop3_inbox_.push_back(one);
       continue;
     }
     if (got == 0) {
