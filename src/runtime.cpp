@@ -420,6 +420,20 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
       udp_carrier_->configure_obfuscation(config.obfuscation, preshared);
       if (config.role == NodeRole::client) udp_carrier_->prime();
     }
+    if (config.spoof_enabled) {
+      if (!SpoofSender::supported()) {
+        return std::unexpected(Diagnostic{RuntimeError::option_not_implemented,
+                                          "transport.spoof needs the Linux raw-socket backend"});
+      }
+      const auto local = transport_.local_port();
+      const std::uint16_t source_port = local.has_value() ? *local : config.listen_port;
+      udp_carrier_->configure_spoofing(config.spoof_sources, source_port);
+      if (!udp_carrier_->spoofing()) {
+        return std::unexpected(Diagnostic{
+            RuntimeError::option_not_implemented,
+            "transport.spoof could not open a raw socket (needs CAP_NET_RAW or root)"});
+      }
+    }
     carrier_ = udp_carrier_.get();
     active_kind_ = TransportKind::udp;
   }

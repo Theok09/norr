@@ -101,7 +101,7 @@ int run(const std::string& path) {
   static_cast<void>(norr::disable_core_dumps());
 
   const std::string user = config->user.empty() ? std::string{"nobody"} : config->user;
-  if (const auto dropped = norr::drop_privileges(user, true); !dropped) {
+  if (const auto dropped = norr::drop_privileges(user, true, config->spoof_enabled); !dropped) {
     std::fprintf(stderr, "privileges: %s\n",
                  std::string{norr::privilege_error_message(dropped.error())}.c_str());
     if (!config->user.empty() && dropped.error() != norr::PrivilegeError::unsupported) return 1;

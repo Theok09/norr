@@ -13,6 +13,8 @@
 
 #include "norr/endpoint.hpp"
 #include "norr/icmp_transport.hpp"
+#include "norr/spoof_feedback.hpp"
+#include "norr/spoof_sender.hpp"
 #include "norr/obfuscation.hpp"
 #include "norr/path_selector.hpp"
 #include "norr/quic_transport.hpp"
@@ -48,6 +50,21 @@ class UdpCarrier final : public Carrier {
     obfuscator_.configure(config, preshared);
   }
 
+  void configure_spoofing(const std::vector<std::uint32_t>& sources_be,
+                          std::uint16_t source_port) {
+    if (sources_be.empty() || !SpoofSender::supported()) return;
+    if (!sender_.open()) return;
+    feedback_ = SpoofFeedback{SpoofPool{sources_be}};
+    spoof_source_port_ = source_port;
+    spoofing_ = true;
+  }
+
+  [[nodiscard]] bool spoofing() const noexcept { return spoofing_; }
+
+  void apply_spoof_receipt(std::span<const std::uint64_t> bitmap, Instant now) noexcept {
+    if (spoofing_) feedback_.apply_receipt(bitmap, now);
+  }
+
   [[nodiscard]] bool obfuscating() const noexcept { return obfuscator_.enabled(); }
 
   [[nodiscard]] TransportKind kind() const noexcept override { return TransportKind::udp; }
@@ -71,12 +88,20 @@ class UdpCarrier final : public Carrier {
   void prime() noexcept { priming_pending_ = obfuscator_.config().priming; }
 
  private:
+  [[nodiscard]] std::expected<std::size_t, TransportError> send_spoofed(
+      std::span<const OutboundDatagram> datagrams) noexcept;
+
   UdpTransport* transport_;
   Obfuscator obfuscator_{};
   std::vector<std::vector<std::byte>> wrap_slots_;
   std::vector<OutboundDatagram> wrap_batch_;
   std::vector<std::vector<std::byte>> unwrap_slots_;
   bool priming_pending_{};
+  SpoofFeedback feedback_{};
+  SpoofSender sender_{};
+  std::vector<SpoofDatagram> spoof_batch_;
+  std::uint16_t spoof_source_port_{};
+  bool spoofing_{};
 };
 
 class IcmpCarrier final : public Carrier {
