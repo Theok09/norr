@@ -27,8 +27,22 @@ void test_build_into_matches_builder() {
                                           payload, b);
   NORR_CHECK(na == nb);
   NORR_CHECK(na == 20 + 8 + 32);
-  NORR_CHECK(a == b);
-  std::puts("spoof_sender: build_into matches build_spoofed_udp OK");
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    if (i == 4 || i == 5 || i == 10 || i == 11) continue;
+    NORR_CHECK(a[i] == b[i]);
+  }
+  std::puts("spoof_sender: build_into matches build_spoofed_udp (ex IP-ID/checksum) OK");
+
+  std::array<std::byte, 20 + 8 + 32> c{};
+  std::array<std::byte, 20 + 8 + 32> d{};
+  static_cast<void>(norr::build_spoofed_udp(datagram.source_be, datagram.destination_be,
+                                            datagram.source_port, datagram.destination_port,
+                                            payload, c));
+  static_cast<void>(norr::build_spoofed_udp(datagram.source_be, datagram.destination_be,
+                                            datagram.source_port, datagram.destination_port,
+                                            payload, d));
+  NORR_CHECK(!(c[4] == d[4] && c[5] == d[5]));
+  std::puts("spoof_sender: IP-ID varies between packets of the same flow OK");
 }
 
 void test_built_header_fields() {

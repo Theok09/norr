@@ -2,6 +2,8 @@
 // Licensed under the GNU AGPL v3 or later. See LICENSE.
 #include "norr/spooftest.hpp"
 
+#include <atomic>
+
 #include <algorithm>
 #include <cstring>
 
@@ -85,11 +87,11 @@ std::size_t build_spoofed_udp(std::uint32_t source_be, std::uint32_t destination
   out[0] = std::byte{0x45};
   out[1] = std::byte{0};
   put_u16(out, 2, static_cast<std::uint16_t>(total));
-  const std::uint32_t id_mix = source_be ^ destination_be ^
-                               (static_cast<std::uint32_t>(source_port) << 16U) ^
-                               static_cast<std::uint32_t>(destination_port) ^
-                               (static_cast<std::uint32_t>(total) * 2654435761U);
-  put_u16(out, 4, static_cast<std::uint16_t>((id_mix >> 3U) & 0xFFFFU));
+  static std::atomic<std::uint32_t> ip_id_counter{0x1234U};
+  const auto raw_id = ip_id_counter.fetch_add(1U, std::memory_order_relaxed);
+  std::uint32_t id_mix = raw_id * 2654435761U;
+  id_mix ^= id_mix >> 15U;
+  put_u16(out, 4, static_cast<std::uint16_t>(id_mix & 0xFFFFU));
   out[6] = std::byte{0x40};
   out[8] = std::byte{64};
   out[9] = std::byte{17};

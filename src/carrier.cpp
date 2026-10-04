@@ -60,25 +60,34 @@ std::expected<std::size_t, TransportError> UdpCarrier::send_spoofed(
   const auto now = std::chrono::steady_clock::now();
   spoof_batch_.clear();
   spoof_batch_.reserve(datagrams.size());
+  bool unspoofable = false;
   for (const auto& datagram : datagrams) {
     const auto& address = datagram.destination.address();
-    if (address.family() != AddressFamily::ipv4) continue;
+    const auto pick = address.family() == AddressFamily::ipv4 ? feedback_.pick(datagram.flow, now)
+                                                              : std::nullopt;
+    if (!pick) {
+      unspoofable = true;
+      continue;
+    }
     const auto octets = address.bytes();
     const auto dest_be = (static_cast<std::uint32_t>(octets[0]) << 24U) |
                          (static_cast<std::uint32_t>(octets[1]) << 16U) |
                          (static_cast<std::uint32_t>(octets[2]) << 8U) |
                          static_cast<std::uint32_t>(octets[3]);
-    const auto pick = feedback_.pick(datagram.flow, now);
-    if (!pick) continue;
     spoof_batch_.push_back(SpoofDatagram{.source_be = pick->source_be,
                                          .destination_be = dest_be,
                                          .source_port = spoof_source_port_,
                                          .destination_port = datagram.destination.port(),
                                          .payload = datagram.payload});
   }
-  if (spoof_batch_.empty()) return std::size_t{0};
+  if (spoof_batch_.empty()) {
+    return transport_->send_batch(datagrams);
+  }
   const auto sent = sender_.send_batch(spoof_batch_);
   if (!sent) return std::unexpected(TransportError::send_failed);
+  if (unspoofable) {
+    static_cast<void>(transport_->send_batch(datagrams));
+  }
   return *sent;
 }
 
