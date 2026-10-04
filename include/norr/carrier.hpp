@@ -65,6 +65,8 @@ class UdpCarrier final : public Carrier {
     return sender_.dropped_oversized();
   }
 
+  [[nodiscard]] std::uint64_t spoof_undeliverable() const noexcept { return spoof_undeliverable_; }
+
   void apply_spoof_receipt(std::span<const std::uint64_t> bitmap, Instant now) noexcept {
     if (spoofing_) feedback_.apply_receipt(bitmap, now);
   }
@@ -106,6 +108,7 @@ class UdpCarrier final : public Carrier {
   std::vector<SpoofDatagram> spoof_batch_;
   std::uint16_t spoof_source_port_{};
   bool spoofing_{};
+  std::uint64_t spoof_undeliverable_{};
 };
 
 class IcmpCarrier final : public Carrier {

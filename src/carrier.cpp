@@ -67,6 +67,7 @@ std::expected<std::size_t, TransportError> UdpCarrier::send_spoofed(
                                                               : std::nullopt;
     if (!pick) {
       unspoofable = true;
+      ++spoof_undeliverable_;
       continue;
     }
     const auto octets = address.bytes();
@@ -81,13 +82,11 @@ std::expected<std::size_t, TransportError> UdpCarrier::send_spoofed(
                                          .payload = datagram.payload});
   }
   if (spoof_batch_.empty()) {
-    return transport_->send_batch(datagrams);
+    if (unspoofable) return std::unexpected(TransportError::would_block);
+    return std::size_t{0};
   }
   const auto sent = sender_.send_batch(spoof_batch_);
   if (!sent) return std::unexpected(TransportError::send_failed);
-  if (unspoofable) {
-    static_cast<void>(transport_->send_batch(datagrams));
-  }
   return *sent;
 }
 
