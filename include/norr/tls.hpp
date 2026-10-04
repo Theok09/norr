@@ -55,7 +55,8 @@ class TlsSession {
 
   [[nodiscard]] std::expected<void, TlsError> start(int descriptor, TlsRole role,
                                                     std::string_view identity,
-                                                    std::span<const std::byte> preshared_key);
+                                                    std::span<const std::byte> preshared_key,
+                                                    std::string_view server_name = {});
 
   [[nodiscard]] std::expected<bool, TlsError> handshake();
 

@@ -188,7 +188,8 @@ std::expected<std::size_t, TransportError> TcpTransport::send_frame(std::span<co
 }
 
 std::expected<void, TransportError> TcpTransport::enable_tls(TlsRole, std::string_view,
-                                                             std::span<const std::byte>) {
+                                                             std::span<const std::byte>,
+                                                             std::string_view) {
   return std::unexpected(TransportError::unsupported_platform);
 }
 
@@ -427,13 +428,14 @@ std::expected<std::size_t, TransportError> TcpTransport::send_frame(
 }
 
 std::expected<void, TransportError> TcpTransport::enable_tls(
-    TlsRole role, std::string_view identity, std::span<const std::byte> preshared_key) {
+    TlsRole role, std::string_view identity, std::span<const std::byte> preshared_key,
+    std::string_view server_name) {
   if (!socket_.valid()) return std::unexpected(TransportError::not_started);
   if (tls_.has_value()) return std::unexpected(TransportError::already_started);
   if (!tls_available()) return std::unexpected(TransportError::unsupported_platform);
 
   tls_.emplace();
-  if (!tls_->start(socket_.get(), role, identity, preshared_key)) {
+  if (!tls_->start(socket_.get(), role, identity, preshared_key, server_name)) {
     tls_.reset();
     return std::unexpected(TransportError::not_started);
   }

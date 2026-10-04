@@ -24,7 +24,7 @@ TlsSession::TlsSession(TlsSession&&) noexcept = default;
 TlsSession& TlsSession::operator=(TlsSession&&) noexcept = default;
 
 std::expected<void, TlsError> TlsSession::start(int, TlsRole, std::string_view,
-                                                std::span<const std::byte>) {
+                                                std::span<const std::byte>, std::string_view) {
   return std::unexpected(TlsError::unsupported);
 }
 
@@ -90,7 +90,8 @@ int psk_server_callback(gnutls_session_t session, const char* username, gnutls_d
 
 std::expected<void, TlsError> TlsSession::start(int descriptor, TlsRole role,
                                                 std::string_view identity,
-                                                std::span<const std::byte> preshared_key) {
+                                                std::span<const std::byte> preshared_key,
+                                                std::string_view server_name) {
   if (identity.empty()) return std::unexpected(TlsError::bad_parameters);
   if (preshared_key.size() < kMinimumPskBytes) return std::unexpected(TlsError::bad_parameters);
 
@@ -134,6 +135,11 @@ std::expected<void, TlsError> TlsSession::start(int descriptor, TlsRole role,
     if (gnutls_credentials_set(impl->session, GNUTLS_CRD_PSK, impl->server_credentials) < 0) {
       return std::unexpected(TlsError::initialisation_failed);
     }
+  }
+
+  if (role == TlsRole::client && !server_name.empty()) {
+    static_cast<void>(gnutls_server_name_set(impl->session, GNUTLS_NAME_DNS, server_name.data(),
+                                             server_name.size()));
   }
 
   gnutls_session_set_ptr(impl->session, impl.get());

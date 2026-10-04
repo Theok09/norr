@@ -83,7 +83,8 @@ class TcpTransport {
   [[nodiscard]] std::expected<void, TransportError> connect(const Endpoint& peer);
 
   [[nodiscard]] std::expected<void, TransportError> enable_tls(
-      TlsRole role, std::string_view identity, std::span<const std::byte> preshared_key);
+      TlsRole role, std::string_view identity, std::span<const std::byte> preshared_key,
+      std::string_view server_name = {});
 
   [[nodiscard]] bool tls_enabled() const noexcept { return tls_.has_value(); }
 

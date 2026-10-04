@@ -167,8 +167,7 @@ class TcpCarrier final : public Carrier {
   }
 
   [[nodiscard]] bool ready() const noexcept {
-    return transport_->connected() &&
-           (camouflage_ ? transport_->camouflage_established() : transport_->tls_established());
+    return transport_->connected() && transport_->tls_established();
   }
 
   void set_connections(std::size_t count) {
