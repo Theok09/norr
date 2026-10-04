@@ -106,6 +106,7 @@ class UdpCarrier final : public Carrier {
   SpoofFeedback feedback_{};
   SpoofSender sender_{};
   std::vector<SpoofDatagram> spoof_batch_;
+  std::vector<OutboundDatagram> real_batch_;
   std::uint16_t spoof_source_port_{};
   bool spoofing_{};
   std::uint64_t spoof_undeliverable_{};

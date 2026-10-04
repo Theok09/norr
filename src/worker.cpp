@@ -63,20 +63,24 @@ std::size_t Worker::flush_transmit() {
     const auto slot = std::span<std::byte>{transmit_slots_[index]};
     const auto sealed = slot.subspan(kFecHeaderSize, job.sealed);
     if (job.fec == kNoFec || !fec_peers_[job.fec].encoder.active()) {
-      transmit_batch_.push_back(OutboundDatagram{.destination = job.destination, .payload = sealed, .flow = job.flow});
+      transmit_batch_.push_back(OutboundDatagram{
+          .destination = job.destination, .payload = sealed, .flow = job.flow, .spoofable = true});
       continue;
     }
     auto& entry = fec_peers_[job.fec];
     static_cast<void>(serialize_fec_header(entry.encoder.next_header(job.sealed), slot));
-    transmit_batch_.push_back(OutboundDatagram{
-        .destination = job.destination, .payload = slot.first(kFecHeaderSize + job.sealed), .flow = job.flow});
+    transmit_batch_.push_back(OutboundDatagram{.destination = job.destination,
+                                               .payload = slot.first(kFecHeaderSize + job.sealed),
+                                               .flow = job.flow,
+                                               .spoofable = true});
     entry.destination = job.destination;
     entry.last_symbol = now;
     for (const auto& symbol : entry.encoder.add(sealed)) {
       if (parity_used == parity_slots_.size()) parity_slots_.emplace_back();
       auto& copy = parity_slots_[parity_used++];
       copy.assign(symbol.begin(), symbol.end());
-      transmit_batch_.push_back(OutboundDatagram{.destination = job.destination, .payload = copy, .flow = job.flow});
+      transmit_batch_.push_back(OutboundDatagram{
+          .destination = job.destination, .payload = copy, .flow = job.flow, .spoofable = true});
     }
   }
   transmit_jobs_.clear();
@@ -219,9 +223,11 @@ DropReason Worker::route_from_tun(std::span<const std::byte> frame, bool batch) 
       const auto parity = fec_state.encoder.add(wire);
       if (!parity.empty()) {
         fec_batch_.clear();
-        fec_batch_.push_back(OutboundDatagram{.destination = fec_state.destination, .payload = framed, .flow = flow});
+        fec_batch_.push_back(OutboundDatagram{.destination = fec_state.destination,
+                                              .payload = framed, .flow = flow, .spoofable = true});
         for (const auto& symbol : parity) {
-          fec_batch_.push_back(OutboundDatagram{.destination = fec_state.destination, .payload = symbol, .flow = flow});
+          fec_batch_.push_back(OutboundDatagram{.destination = fec_state.destination,
+                                                .payload = symbol, .flow = flow, .spoofable = true});
         }
         if (send_all(fec_batch_) == 0) {
           bytes_dropped_ += framed.size();
@@ -253,7 +259,7 @@ DropReason Worker::route_from_tun(std::span<const std::byte> frame, bool batch) 
   }
 
   const std::array<OutboundDatagram, 1> datagram{
-      OutboundDatagram{.destination = *session->endpoint(), .payload = wire}};
+      OutboundDatagram{.destination = *session->endpoint(), .payload = wire, .spoofable = true}};
   const auto sent = transport_->send_batch(datagram);
   if (!sent || *sent == 0) {
     bytes_dropped_ += wire.size();
@@ -343,7 +349,8 @@ void Worker::send_parity(FecPeer& entry, std::span<const std::vector<std::byte>>
   if (parity.empty()) return;
   fec_batch_.clear();
   for (const auto& symbol : parity) {
-    fec_batch_.push_back(OutboundDatagram{.destination = entry.destination, .payload = symbol});
+    fec_batch_.push_back(OutboundDatagram{.destination = entry.destination, .payload = symbol,
+                                          .flow = 0, .spoofable = true});
   }
   static_cast<void>(send_all(fec_batch_));
 }
@@ -463,7 +470,8 @@ std::size_t Worker::drain_queue(Instant now) {
     }
 
     const std::array<OutboundDatagram, 1> datagram{
-        OutboundDatagram{.destination = packet->destination, .payload = packet->bytes}};
+        OutboundDatagram{.destination = packet->destination, .payload = packet->bytes,
+                         .flow = 0, .spoofable = true}};
     const auto result = transport_->send_batch(datagram);
     if (!result || *result == 0) {
       bytes_dropped_ += packet->bytes.size();

@@ -40,7 +40,9 @@ std::expected<std::size_t, TransportError> UdpCarrier::send_batch(
     const auto wrapped = obfuscator_.wrap(datagrams[index].payload, slot);
     if (!wrapped) continue;
     wrap_batch_.push_back(OutboundDatagram{.destination = datagrams[index].destination,
-                                           .payload = std::span{slot}.first(*wrapped)});
+                                           .payload = std::span{slot}.first(*wrapped),
+                                           .flow = datagrams[index].flow,
+                                           .spoofable = datagrams[index].spoofable});
   }
   if (wrap_batch_.empty()) return std::size_t{0};
 
@@ -60,14 +62,20 @@ std::expected<std::size_t, TransportError> UdpCarrier::send_spoofed(
   const auto now = std::chrono::steady_clock::now();
   spoof_batch_.clear();
   spoof_batch_.reserve(datagrams.size());
+  real_batch_.clear();
   bool unspoofable = false;
   for (const auto& datagram : datagrams) {
     const auto& address = datagram.destination.address();
-    const auto pick = address.family() == AddressFamily::ipv4 ? feedback_.pick(datagram.flow, now)
-                                                              : std::nullopt;
+    const auto pick = (datagram.spoofable && address.family() == AddressFamily::ipv4)
+                          ? feedback_.pick(datagram.flow, now)
+                          : std::nullopt;
     if (!pick) {
-      unspoofable = true;
-      ++spoof_undeliverable_;
+      if (datagram.spoofable) {
+        unspoofable = true;
+        ++spoof_undeliverable_;
+      } else {
+        real_batch_.push_back(datagram);
+      }
       continue;
     }
     const auto octets = address.bytes();
@@ -81,13 +89,18 @@ std::expected<std::size_t, TransportError> UdpCarrier::send_spoofed(
                                          .destination_port = datagram.destination.port(),
                                          .payload = datagram.payload});
   }
+  std::size_t real_sent = 0;
+  if (!real_batch_.empty()) {
+    const auto r = transport_->send_batch(real_batch_);
+    real_sent = r.value_or(0);
+  }
   if (spoof_batch_.empty()) {
-    if (unspoofable) return std::unexpected(TransportError::would_block);
-    return std::size_t{0};
+    if (unspoofable && real_sent == 0) return std::unexpected(TransportError::would_block);
+    return real_sent;
   }
   const auto sent = sender_.send_batch(spoof_batch_);
   if (!sent) return std::unexpected(TransportError::send_failed);
-  return *sent;
+  return *sent + real_sent;
 }
 
 std::expected<std::size_t, TransportError> UdpCarrier::receive_batch(
