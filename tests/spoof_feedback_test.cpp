@@ -4,6 +4,7 @@
 #include <set>
 #include <vector>
 
+#include "norr/packet.hpp"
 #include "norr/spoof_feedback.hpp"
 
 namespace {
@@ -97,6 +98,26 @@ void test_no_reroll_pins_flow() {
   std::puts("spoof_feedback: with no reroll, a flow stays pinned OK");
 }
 
+void test_receipt_frame_roundtrip() {
+  const std::vector<std::size_t> received{0, 5, 63, 64, 130};
+  const auto bitmap = norr::make_receipt_bitmap(received, 200);
+  const auto frame = norr::encode_spoof_receipt(bitmap);
+  NORR_CHECK(!frame.empty());
+  NORR_CHECK(frame[0] == norr::kSpoofReceipt);
+  const auto decoded = norr::decode_spoof_receipt(frame);
+  for (const auto idx : received) NORR_CHECK(norr::receipt_bit(decoded, idx));
+  NORR_CHECK(!norr::receipt_bit(decoded, 1));
+  NORR_CHECK(!norr::receipt_bit(decoded, 129));
+  std::puts("spoof_feedback: receipt control frame encodes and decodes OK");
+}
+
+void test_receipt_frame_rejects_bad_tag() {
+  const std::vector<std::byte> bad{std::byte{0x03}, std::byte{0xFF}};
+  NORR_CHECK(norr::decode_spoof_receipt(bad).empty());
+  NORR_CHECK(norr::decode_spoof_receipt({}).empty());
+  std::puts("spoof_feedback: receipt decode rejects wrong tag and empty OK");
+}
+
 void test_randomized_feedback_loop() {
   norr::SpoofFeedback fb{pool_of(12), {.miss_windows = 3,
                                        .reroll_interval = std::chrono::seconds{5}}};
@@ -131,6 +152,8 @@ int main() {
   test_unused_source_not_penalized();
   test_epoch_reroll_migrates_long_flow();
   test_no_reroll_pins_flow();
+  test_receipt_frame_roundtrip();
+  test_receipt_frame_rejects_bad_tag();
   test_randomized_feedback_loop();
   std::puts("spoof_feedback: all tests passed");
   return 0;

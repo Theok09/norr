@@ -33,6 +33,8 @@ inline constexpr std::byte kEchoReply{2};
 inline constexpr std::size_t kEchoTokenSize = 8;
 inline constexpr std::byte kLossReport{3};
 inline constexpr std::size_t kLossReportSize = 5;
+inline constexpr std::byte kSpoofReceipt{4};
+inline constexpr std::size_t kSpoofReceiptMaxWords = 16;
 
 struct PacketHeader {
   std::uint8_t version{};

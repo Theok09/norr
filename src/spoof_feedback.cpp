@@ -2,7 +2,10 @@
 // Licensed under the GNU AGPL v3 or later. See LICENSE.
 #include "norr/spoof_feedback.hpp"
 
+#include <algorithm>
 #include <utility>
+
+#include "norr/packet.hpp"
 
 namespace norr {
 namespace {
@@ -71,5 +74,34 @@ bool receipt_bit(std::span<const std::uint64_t> bitmap, std::size_t index) noexc
   const auto word = index / 64;
   if (word >= bitmap.size()) return false;
   return ((bitmap[word] >> (index % 64)) & 1ULL) != 0;
+}
+
+std::vector<std::byte> encode_spoof_receipt(std::span<const std::uint64_t> bitmap) {
+  const auto words = std::min<std::size_t>(bitmap.size(), kSpoofReceiptMaxWords);
+  std::vector<std::byte> out;
+  out.reserve(1 + words * 8);
+  out.push_back(kSpoofReceipt);
+  for (std::size_t w = 0; w < words; ++w) {
+    for (int shift = 56; shift >= 0; shift -= 8) {
+      out.push_back(static_cast<std::byte>((bitmap[w] >> static_cast<unsigned>(shift)) & 0xFFU));
+    }
+  }
+  return out;
+}
+
+std::vector<std::uint64_t> decode_spoof_receipt(std::span<const std::byte> payload) {
+  std::vector<std::uint64_t> bitmap;
+  if (payload.empty() || payload[0] != kSpoofReceipt) return bitmap;
+  const auto body = payload.subspan(1);
+  const auto words = body.size() / 8;
+  bitmap.reserve(words);
+  for (std::size_t w = 0; w < words; ++w) {
+    std::uint64_t value = 0;
+    for (std::size_t b = 0; b < 8; ++b) {
+      value = (value << 8U) | static_cast<std::uint64_t>(body[w * 8 + b]);
+    }
+    bitmap.push_back(value);
+  }
+  return bitmap;
 }
 }

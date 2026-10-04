@@ -55,4 +55,8 @@ class SpoofFeedback {
                                                              std::size_t pool_size);
 
 [[nodiscard]] bool receipt_bit(std::span<const std::uint64_t> bitmap, std::size_t index) noexcept;
+
+[[nodiscard]] std::vector<std::byte> encode_spoof_receipt(std::span<const std::uint64_t> bitmap);
+
+[[nodiscard]] std::vector<std::uint64_t> decode_spoof_receipt(std::span<const std::byte> payload);
 }
