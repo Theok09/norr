@@ -30,6 +30,21 @@ void Obfuscator::configure(const ObfuscationConfig& config,
   for (const auto byte : seed) {
     nonce_counter_ = (nonce_counter_ << 8U) | static_cast<std::uint64_t>(byte);
   }
+
+  std::array<std::byte, sizeof(std::uint64_t)> junk_seed{};
+  if (!random_bytes(junk_seed)) junk_seed = {};
+  junk_rng_ = 0x9E3779B97F4A7C15ULL;
+  for (const auto byte : junk_seed) {
+    junk_rng_ = (junk_rng_ << 8U) | static_cast<std::uint64_t>(byte);
+  }
+  if (junk_rng_ == 0) junk_rng_ = 0x9E3779B97F4A7C15ULL;
+}
+
+std::uint64_t Obfuscator::next_junk_random() noexcept {
+  junk_rng_ ^= junk_rng_ << 13U;
+  junk_rng_ ^= junk_rng_ >> 7U;
+  junk_rng_ ^= junk_rng_ << 17U;
+  return junk_rng_;
 }
 
 void Obfuscator::next_nonce(std::span<std::byte> out) noexcept {
@@ -80,27 +95,22 @@ std::expected<std::size_t, ObfuscationError> Obfuscator::wrap(
 
   std::size_t junk_length = 0;
   if (config_.junk_padding && config_.junk_max > 0) {
-    std::array<std::byte, 4> pick{};
-    if (random_bytes(pick)) {
-      std::uint32_t entropy = 0;
-      for (const auto byte : pick) entropy = (entropy << 8U) | static_cast<std::uint32_t>(byte);
-
-      const std::size_t cap = config_.junk_max;
-      const std::size_t bucket = config_.length_bucket == 0 ? 1U : config_.length_bucket;
-      const std::size_t base_len = kJunkLengthFieldSize + plaintext.size();
-      const std::size_t to_bucket = (bucket - (base_len % bucket)) % bucket;
-      const std::size_t floor = to_bucket <= cap ? to_bucket : 0U;
-      const std::size_t span = cap - floor + 1U;
-      junk_length = floor + static_cast<std::size_t>(entropy % span);
-    }
+    const auto entropy = next_junk_random();
+    const std::size_t cap = config_.junk_max;
+    const std::size_t bucket = config_.length_bucket == 0 ? 1U : config_.length_bucket;
+    const std::size_t base_len = kJunkLengthFieldSize + plaintext.size();
+    const std::size_t to_bucket = (bucket - (base_len % bucket)) % bucket;
+    const std::size_t floor = to_bucket <= cap ? to_bucket : 0U;
+    const std::size_t span = cap - floor + 1U;
+    junk_length = floor + static_cast<std::size_t>(entropy % span);
   }
 
   const auto body = kJunkLengthFieldSize + junk_length + plaintext.size();
   if (region.size() < body) return std::unexpected(ObfuscationError::buffer_too_small);
 
   region[0] = static_cast<std::byte>(junk_length);
-  if (junk_length > 0) {
-    static_cast<void>(random_bytes(region.subspan(kJunkLengthFieldSize, junk_length)));
+  for (std::size_t i = 0; i < junk_length; ++i) {
+    region[kJunkLengthFieldSize + i] = static_cast<std::byte>(next_junk_random() & 0xFFU);
   }
   std::copy(plaintext.begin(), plaintext.end(),
             region.begin() + static_cast<std::ptrdiff_t>(kJunkLengthFieldSize + junk_length));

@@ -110,9 +110,12 @@ class Obfuscator {
 
   void next_nonce(std::span<std::byte> out) noexcept;
 
+  [[nodiscard]] std::uint64_t next_junk_random() noexcept;
+
   ObfuscationConfig config_{};
   ObfuscationKey key_{};
   std::uint64_t nonce_counter_{};
+  std::uint64_t junk_rng_{};
   std::vector<std::byte> unwrap_scratch_{};
 };
 }
