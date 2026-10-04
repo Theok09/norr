@@ -95,7 +95,7 @@ class ReceiveBuffers {
 
 class UdpTransport {
  public:
-  static constexpr std::size_t kDefaultBatchSize = 64;
+  static constexpr std::size_t kDefaultBatchSize = 256;
 
   static constexpr std::size_t kDefaultDatagramSize = 2048;
 
