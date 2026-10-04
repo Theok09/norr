@@ -207,7 +207,7 @@ std::expected<void, TransportError> UdpTransport::start(const Endpoint& bind_add
   backlog_.clear();
   backlog_next_ = 0;
 
-  constexpr int kSocketBufferBytes = 8 * 1024 * 1024;
+  constexpr int kSocketBufferBytes = 32 * 1024 * 1024;
   for (const int option : {SO_RCVBUFFORCE, SO_SNDBUFFORCE}) {
     if (::setsockopt(socket_.get(), SOL_SOCKET, option, &kSocketBufferBytes,
                      sizeof(kSocketBufferBytes)) != 0) {
