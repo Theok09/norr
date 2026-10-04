@@ -12,6 +12,8 @@ ExecStop=/usr/local/lib/norr/norr-quick down %i
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=65536
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_SETUID CAP_SETGID CAP_SETPCAP
 
 [Install]
 WantedBy=multi-user.target
