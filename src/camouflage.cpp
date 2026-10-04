@@ -112,10 +112,6 @@ std::span<const std::byte> extract_server_key_share(std::span<const std::byte> r
            static_cast<std::size_t>(static_cast<std::uint8_t>(b[o + 1]));
   };
 
-  // A ServerHello names one cipher suite as a bare u16 and one compression
-  // byte, where a ClientHello length-prefixes a list of each. Parsing one with
-  // the other's layout reads the cipher id as a list length and walks off the
-  // end, which is why this is a separate function rather than a flag.
   std::size_t p = kTlsRecordHeaderSize + 4;
   if (record.size() < p + 2 + kTlsRandomSize + 1) return {};
   p += 2 + kTlsRandomSize;
@@ -311,6 +307,25 @@ std::vector<std::byte> build_server_hello(std::span<const std::byte> session_id,
   return framed_handshake(0x02, body, 0x0303);
 }
 
+std::vector<std::byte> build_certificate_flight() {
+  static constexpr std::array<std::size_t, kCertificateFlightRecords> kFlightSizes{
+      32, 1400, 280, 52};
+
+  std::vector<std::byte> out;
+  for (const auto base : kFlightSizes) {
+    std::array<std::byte, 1> pick{};
+    const auto jitter = random_bytes(pick)
+                            ? static_cast<std::size_t>(static_cast<std::uint8_t>(pick[0])) % 97U
+                            : 0U;
+    const auto length = base + jitter;
+    std::array<std::byte, kTlsRecordHeaderSize> header{};
+    static_cast<void>(write_record_header(TlsRecordType::application_data, length, header));
+    push_bytes(out, header);
+    push_random(out, length);
+  }
+  return out;
+}
+
 std::vector<std::byte> build_change_cipher_spec() {
   std::vector<std::byte> record;
   push_u8(record, static_cast<std::uint8_t>(TlsRecordType::change_cipher_spec));
@@ -380,10 +395,6 @@ std::expected<std::span<const std::byte>, CamouflageError> CamouflageFramer::nex
       return std::unexpected(record.error());
     }
 
-    // Nothing from the server is accepted before it has proved possession of
-    // its private key. Checking only records that happen to be a ServerHello
-    // would let an impostor skip it - send a handshake of another type, or go
-    // straight to application data - and never be challenged at all.
     if (role_ == Role::client && reality_enabled_ && !reality_server_verified_) {
       const auto frame = view.first(record->consumed);
       if (record->type != TlsRecordType::handshake || frame.size() <= kTlsRecordHeaderSize ||
@@ -392,8 +403,6 @@ std::expected<std::span<const std::byte>, CamouflageError> CamouflageFramer::nex
         return std::unexpected(CamouflageError::malformed);
       }
 
-      // The auth tag rides in ServerHello.random: thirty-two bytes an observer
-      // cannot tell from the random they replace.
       constexpr std::size_t kRandomOffset = kTlsRecordHeaderSize + 4 + 2;
       const auto share = extract_server_key_share(frame);
       if (frame.size() >= kRandomOffset + kRealityAuthSize && share.size() == kPublicKeySize) {
@@ -408,6 +417,11 @@ std::expected<std::span<const std::byte>, CamouflageError> CamouflageFramer::nex
     }
 
     if (record->type == TlsRecordType::handshake) {
+      if (role_ == Role::client && !flight_armed_ && view.size() > kTlsRecordHeaderSize &&
+          static_cast<std::uint8_t>(view[kTlsRecordHeaderSize]) == 0x02) {
+        flight_armed_ = true;
+        flight_remaining_ = kCertificateFlightRecords;
+      }
       if (role_ == Role::server && !sent_reply_ && looks_like_client_hello(view)) {
         std::span<const std::byte> session_id{};
         constexpr std::size_t kSessionIdLenOffset = kTlsRecordHeaderSize + 4 + 2 + kTlsRandomSize;
@@ -461,6 +475,8 @@ std::expected<std::span<const std::byte>, CamouflageError> CamouflageFramer::nex
           pending_reply_ = build_server_hello(session_id, share_bytes, auth_bytes);
           const auto ccs = build_change_cipher_spec();
           pending_reply_.insert(pending_reply_.end(), ccs.begin(), ccs.end());
+          const auto flight = build_certificate_flight();
+          pending_reply_.insert(pending_reply_.end(), flight.begin(), flight.end());
         }
         sent_reply_ = true;
       }
@@ -470,6 +486,11 @@ std::expected<std::span<const std::byte>, CamouflageError> CamouflageFramer::nex
     }
     if (record->type != TlsRecordType::application_data) {
       handshake_done_ = true;
+      consumed_ += record->consumed;
+      continue;
+    }
+    if (flight_remaining_ > 0) {
+      --flight_remaining_;
       consumed_ += record->consumed;
       continue;
     }

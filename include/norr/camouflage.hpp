@@ -66,6 +66,10 @@ struct TlsRecordView {
 
 [[nodiscard]] std::vector<std::byte> build_change_cipher_spec();
 
+inline constexpr std::size_t kCertificateFlightRecords = 4;
+
+[[nodiscard]] std::vector<std::byte> build_certificate_flight();
+
 [[nodiscard]] bool looks_like_client_hello(std::span<const std::byte> bytes) noexcept;
 
 [[nodiscard]] std::span<const std::byte> extract_key_share_x25519(
@@ -137,6 +141,8 @@ class CamouflageFramer {
   bool reality_enabled_{};
   bool reality_authenticated_{};
   bool reality_server_verified_{};
+  bool flight_armed_{};
+  std::size_t flight_remaining_{};
   bool reality_rejected_{};
   PublicKey reality_server_public_{};
   PrivateKey reality_server_private_{};
