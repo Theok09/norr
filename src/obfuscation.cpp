@@ -80,15 +80,18 @@ std::expected<std::size_t, ObfuscationError> Obfuscator::wrap(
 
   std::size_t junk_length = 0;
   if (config_.junk_padding && config_.junk_max > 0) {
-    std::array<std::byte, 1> pick{};
+    std::array<std::byte, 4> pick{};
     if (random_bytes(pick)) {
+      std::uint32_t entropy = 0;
+      for (const auto byte : pick) entropy = (entropy << 8U) | static_cast<std::uint32_t>(byte);
+
       const std::size_t cap = config_.junk_max;
       const std::size_t bucket = config_.length_bucket == 0 ? 1U : config_.length_bucket;
       const std::size_t base_len = kJunkLengthFieldSize + plaintext.size();
       const std::size_t to_bucket = (bucket - (base_len % bucket)) % bucket;
-      const std::size_t jitter = static_cast<std::size_t>(pick[0]) % (cap + 1U);
-      junk_length = std::min(cap, to_bucket <= cap ? to_bucket + (jitter % (cap - to_bucket + 1U))
-                                                   : jitter);
+      const std::size_t floor = to_bucket <= cap ? to_bucket : 0U;
+      const std::size_t span = cap - floor + 1U;
+      junk_length = floor + static_cast<std::size_t>(entropy % span);
     }
   }
 

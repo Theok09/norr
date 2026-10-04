@@ -77,7 +77,6 @@ struct ObfuscationConfig {
 [[nodiscard]] ObfuscationKey derive_obfuscation_key(
     const PresharedKey& preshared) noexcept;
 
-
 class Obfuscator {
  public:
   Obfuscator() = default;
