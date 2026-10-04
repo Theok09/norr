@@ -19,6 +19,12 @@ void push_u16(std::vector<std::byte>& out, std::uint16_t value) {
   out.push_back(static_cast<std::byte>(value >> 8U));
   out.push_back(static_cast<std::byte>(value & 0xFFU));
 }
+void push_u32(std::vector<std::byte>& out, std::uint32_t value) {
+  out.push_back(static_cast<std::byte>((value >> 24U) & 0xFFU));
+  out.push_back(static_cast<std::byte>((value >> 16U) & 0xFFU));
+  out.push_back(static_cast<std::byte>((value >> 8U) & 0xFFU));
+  out.push_back(static_cast<std::byte>(value & 0xFFU));
+}
 void push_bytes(std::vector<std::byte>& out, std::span<const std::byte> bytes) {
   out.insert(out.end(), bytes.begin(), bytes.end());
 }
@@ -168,12 +174,20 @@ std::expected<TlsRecordView, CamouflageError> parse_record(
                        .consumed = kTlsRecordHeaderSize + length};
 }
 
+std::uint16_t grease_value() noexcept {
+  std::array<std::byte, 1> pick{};
+  const auto nibble = random_bytes(pick) ? (static_cast<unsigned>(pick[0]) & 0x0FU) : 0x0AU;
+  const auto byte = static_cast<std::uint16_t>((nibble << 4U) | 0x0AU);
+  return static_cast<std::uint16_t>((byte << 8U) | byte);
+}
+
 std::vector<std::byte> build_client_hello(std::string_view server_name,
                                          std::span<const std::byte> key_share,
                                          std::span<const std::byte> session_id) {
-  static constexpr std::array<std::uint16_t, 15> kCiphers{
-      0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030, 0xcca9,
-      0xcca8, 0xc013, 0xc014, 0x009c, 0x009d, 0x002f, 0x0035};
+  const auto grease = grease_value();
+  const std::array<std::uint16_t, 16> ciphers{
+      grease, 0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030,
+      0xcca9, 0xcca8, 0xc013, 0xc014, 0x009c, 0x009d, 0x002f, 0x0035};
 
   std::vector<std::byte> body;
   push_u16(body, 0x0303);
@@ -185,13 +199,16 @@ std::vector<std::byte> build_client_hello(std::string_view server_name,
     push_random(body, kTlsSessionIdSize);
   }
 
-  push_u16(body, static_cast<std::uint16_t>(kCiphers.size() * 2));
-  for (const auto cipher : kCiphers) push_u16(body, cipher);
+  push_u16(body, static_cast<std::uint16_t>(ciphers.size() * 2));
+  for (const auto cipher : ciphers) push_u16(body, cipher);
 
   push_u8(body, 1);
   push_u8(body, 0);
 
   std::vector<std::byte> ext;
+
+  push_u16(ext, grease);
+  push_u16(ext, 0);
 
   push_u16(ext, 0x0000);
   {
@@ -203,29 +220,8 @@ std::vector<std::byte> build_client_hello(std::string_view server_name,
     push_bytes(ext, std::as_bytes(std::span{server_name}));
   }
 
-  push_u16(ext, 0x000b);
-  push_u16(ext, 2);
-  push_u8(ext, 1);
-  push_u8(ext, 0);
-
-  push_u16(ext, 0x000a);
-  push_u16(ext, 8);
-  push_u16(ext, 6);
-  push_u16(ext, 0x001d);
   push_u16(ext, 0x0017);
-  push_u16(ext, 0x0018);
-
-  push_u16(ext, 0x0023);
   push_u16(ext, 0);
-
-  push_u16(ext, 0x0010);
-  push_u16(ext, 14);
-  push_u16(ext, 12);
-  push_u8(ext, 2);
-  push_u8(ext, 'h');
-  push_u8(ext, '2');
-  push_u8(ext, 8);
-  push_bytes(ext, std::as_bytes(std::span{std::string_view{"http/1.1"}}));
 
   push_u16(ext, 0x000d);
   {
@@ -236,21 +232,55 @@ std::vector<std::byte> build_client_hello(std::string_view server_name,
     for (const auto sig : kSig) push_u16(ext, sig);
   }
 
-  push_u16(ext, 0x002b);
+  push_u16(ext, 0x0010);
+  push_u16(ext, 14);
+  push_u16(ext, 12);
+  push_u8(ext, 2);
+  push_u8(ext, 'h');
+  push_u8(ext, '2');
+  push_u8(ext, 8);
+  push_bytes(ext, std::as_bytes(std::span{std::string_view{"http/1.1"}}));
+
+  push_u16(ext, 0x0005);
   push_u16(ext, 5);
-  push_u8(ext, 4);
-  push_u16(ext, 0x0304);
-  push_u16(ext, 0x0303);
+  push_u8(ext, 1);
+  push_u32(ext, 0);
+
+  push_u16(ext, 0x000b);
+  push_u16(ext, 2);
+  push_u8(ext, 1);
+  push_u8(ext, 0);
+
+  push_u16(ext, 0x000a);
+  push_u16(ext, 10);
+  push_u16(ext, 8);
+  push_u16(ext, grease);
+  push_u16(ext, 0x001d);
+  push_u16(ext, 0x0017);
+  push_u16(ext, 0x0018);
+
+  push_u16(ext, 0x0023);
+  push_u16(ext, 0);
 
   push_u16(ext, 0x002d);
   push_u16(ext, 2);
   push_u8(ext, 1);
-  push_u8(ext, 1);
+  push_u8(ext, 0);
+
+  push_u16(ext, 0x002b);
+  push_u16(ext, 7);
+  push_u8(ext, 6);
+  push_u16(ext, grease);
+  push_u16(ext, 0x0304);
+  push_u16(ext, 0x0303);
 
   push_u16(ext, 0x0033);
   {
-    push_u16(ext, static_cast<std::uint16_t>(kTlsRandomSize + 6));
-    push_u16(ext, static_cast<std::uint16_t>(kTlsRandomSize + 4));
+    push_u16(ext, static_cast<std::uint16_t>(kTlsRandomSize + 11));
+    push_u16(ext, static_cast<std::uint16_t>(kTlsRandomSize + 9));
+    push_u16(ext, grease);
+    push_u16(ext, 1);
+    push_u8(ext, 0);
     push_u16(ext, 0x001d);
     push_u16(ext, static_cast<std::uint16_t>(kTlsRandomSize));
     if (key_share.size() == kTlsRandomSize) {
@@ -259,6 +289,10 @@ std::vector<std::byte> build_client_hello(std::string_view server_name,
       push_random(ext, kTlsRandomSize);
     }
   }
+
+  push_u16(ext, grease);
+  push_u16(ext, 1);
+  push_u8(ext, 0);
 
   push_u16(body, static_cast<std::uint16_t>(ext.size()));
   push_bytes(body, ext);
