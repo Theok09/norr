@@ -5,6 +5,7 @@
 #include <algorithm>
 
 #include <array>
+#include <cstdio>
 
 namespace norr {
 std::expected<std::size_t, TransportError> UdpCarrier::send_batch(
@@ -132,36 +133,92 @@ std::expected<std::size_t, TransportError> IcmpCarrier::receive_batch(
   return kept;
 }
 
-void TcpCarrier::drive(TcpTransport& transport, bool& tls_started, bool dialing) {
+bool TcpCarrier::connection_ready(const TcpTransport& conn) const noexcept {
+  return conn.connected() && (camouflage_ ? conn.camouflage_established() : conn.tls_established());
+}
+
+std::size_t TcpCarrier::ready_count() const noexcept {
+  std::size_t count = connection_ready(*transport_) ? 1 : 0;
+  for (const auto& conn : extra_) {
+    if (connection_ready(conn)) ++count;
+  }
+  return count;
+}
+
+void TcpCarrier::note_failure(ConnectionSlot& slot, Instant now) noexcept {
+  auto delay = std::chrono::duration_cast<Duration>(kCarrierRetryBase);
+  for (std::uint32_t step = 0; step < slot.failures && delay < kCarrierRetryMax; ++step) delay *= 2;
+  slot.next_attempt = now + std::min<Duration>(delay, kCarrierRetryMax);
+  ++slot.failures;
+  slot.started = false;
+  slot.phase_since = Instant{};
+  slot.last_rx = Instant{};
+}
+
+void TcpCarrier::drive(TcpTransport& transport, ConnectionSlot& slot, bool dialing, Instant now) {
   if (dialing && transport.state() == TcpState::closed) {
-    tls_started = false;
+    if (slot.next_attempt != Instant{} && now < slot.next_attempt) return;
+    slot.started = false;
     if (!sni_pool_.empty()) {
       sni_ = sni_pool_[sni_index_ % sni_pool_.size()];
       ++sni_index_;
     }
-    static_cast<void>(transport.connect(peer_));
+    transport.set_mark(mark_);
+    if (!transport.connect(peer_)) {
+      note_failure(slot, now);
+      return;
+    }
+    slot.phase_since = now;
     return;
+  }
+
+  if (transport.state() == TcpState::closed) return;
+  if (slot.phase_since == Instant{}) slot.phase_since = now;
+
+  if (transport.state() == TcpState::failed) {
+    transport.close();
+    note_failure(slot, now);
+    return;
+  }
+
+  const bool ready = connection_ready(transport);
+  if (!ready && now - slot.phase_since > kCarrierSetupTimeout) {
+    transport.close();
+    note_failure(slot, now);
+    return;
+  }
+
+  if (ready) {
+    if (slot.last_rx == Instant{}) slot.last_rx = now;
+    if (now - slot.last_rx > kConnectionSilenceTimeout) {
+      transport.close();
+      note_failure(slot, now);
+      std::fprintf(stderr, "tcp carrier: connection silent, reconnecting\n");
+      std::fflush(stderr);
+      return;
+    }
+    slot.failures = 0;
+    slot.next_attempt = Instant{};
   }
 
   if (transport.state() == TcpState::connecting) {
     const auto connected = transport.poll_connect();
-    if (!connected || !*connected) return;
-  }
-
-  if (transport.state() == TcpState::failed) {
-    transport.close();
-    tls_started = false;
-    return;
+    if (!connected) {
+      transport.close();
+      note_failure(slot, now);
+      return;
+    }
+    if (!*connected) return;
   }
 
   if (!transport.connected()) return;
 
   if (camouflage_) {
-    if (!tls_started) {
+    if (!slot.started) {
       const auto role = dialing ? CamouflageFramer::Role::client : CamouflageFramer::Role::server;
       apply_reality(transport);
       if (transport.enable_camouflage(role, sni_)) {
-        tls_started = true;
+        slot.started = true;
       } else {
         return;
       }
@@ -174,10 +231,10 @@ void TcpCarrier::drive(TcpTransport& transport, bool& tls_started, bool dialing)
     return;
   }
 
-  if (!tls_started) {
+  if (!slot.started) {
     const auto role = dialing ? TlsRole::client : TlsRole::server;
     if (transport.enable_tls(role, "norr", preshared_)) {
-      tls_started = true;
+      slot.started = true;
     } else {
       return;
     }
@@ -192,19 +249,16 @@ void TcpCarrier::drive(TcpTransport& transport, bool& tls_started, bool dialing)
 }
 
 void TcpCarrier::poll(Instant now) {
-  static_cast<void>(now);
-  drive(*transport_, tls_started_, dialing_);
+  drive(*transport_, primary_slot_, dialing_, now);
 
   if (dialing_) {
     while (extra_.size() + 1 < target_) {
       extra_.emplace_back();
-      extra_started_.push_back(false);
+      extra_slots_.push_back(ConnectionSlot{});
     }
   }
   for (std::size_t index = 0; index < extra_.size(); ++index) {
-    bool started = extra_started_[index];
-    drive(extra_[index], started, dialing_);
-    extra_started_[index] = started;
+    drive(extra_[index], extra_slots_[index], dialing_, now);
   }
 
   if (!dialing_) reap();
@@ -215,30 +269,26 @@ void TcpCarrier::reap() noexcept {
     const auto state = extra_[index].state();
     if (state == TcpState::closed || state == TcpState::failed) {
       extra_.erase(extra_.begin() + static_cast<std::ptrdiff_t>(index));
-      extra_started_.erase(extra_started_.begin() + static_cast<std::ptrdiff_t>(index));
+      extra_slots_.erase(extra_slots_.begin() + static_cast<std::ptrdiff_t>(index));
     }
   }
 }
 
 void TcpCarrier::reset_all() noexcept {
   transport_->close();
-  tls_started_ = false;
+  primary_slot_ = ConnectionSlot{};
   for (auto& conn : extra_) conn.close();
-  std::fill(extra_started_.begin(), extra_started_.end(), false);
+  for (auto& slot : extra_slots_) slot = ConnectionSlot{};
 }
 
 std::expected<std::size_t, TransportError> TcpCarrier::send_batch(
     std::span<const OutboundDatagram> datagrams) {
-  const auto ready = [this](const TcpTransport& conn) {
-    return conn.connected() &&
-           (camouflage_ ? conn.camouflage_established() : conn.tls_established());
-  };
   std::array<TcpTransport*, 8> ready_conns{};
   std::size_t count = 0;
-  if (ready(*transport_)) ready_conns[count++] = transport_;
+  if (connection_ready(*transport_)) ready_conns[count++] = transport_;
   for (auto& conn : extra_) {
     if (count >= ready_conns.size()) break;
-    if (ready(conn)) ready_conns[count++] = &conn;
+    if (connection_ready(conn)) ready_conns[count++] = &conn;
   }
   if (count == 0) return std::unexpected(TransportError::not_started);
 
@@ -266,8 +316,7 @@ std::expected<std::size_t, TransportError> TcpCarrier::send_batch(
       }
       if (result.error() != TransportError::would_block) {
         ++stats_.tx_errors;
-        return sent > 0 ? std::expected<std::size_t, TransportError>{sent}
-                        : std::unexpected(result.error());
+        conn->close();
       }
     }
     if (!delivered) break;
@@ -317,8 +366,15 @@ std::expected<std::size_t, TransportError> TcpCarrier::receive_batch(
     }
   };
 
+  const auto now = std::chrono::steady_clock::now();
+  const auto before = delivered;
   drain(*transport_);
-  for (auto& conn : extra_) drain(conn);
+  if (delivered > before) primary_slot_.last_rx = now;
+  for (std::size_t index = 0; index < extra_.size(); ++index) {
+    const auto mark = delivered;
+    drain(extra_[index]);
+    if (delivered > mark) extra_slots_[index].last_rx = now;
+  }
   return delivered;
 }
 

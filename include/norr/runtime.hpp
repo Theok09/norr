@@ -117,7 +117,8 @@ class Runtime {
   void service_timers(Instant now);
 
   void send_keepalive(PeerId peer);
-  void send_control(PeerId peer, std::span<const std::byte> payload);
+  void send_control(PeerId peer, std::span<const std::byte> payload,
+                    bool every_connection = false);
   void answer_echo(PeerId peer, std::span<const std::byte> token);
   void note_echo_reply(PeerId peer, std::span<const std::byte> token);
 
@@ -164,6 +165,7 @@ class Runtime {
   bool tcp_ready_{};
   Instant tcp_accepted_at_{};
   Instant tcp_ready_since_{};
+  Instant not_ready_since_{};
   std::uint64_t tcp_silence_resets_{};
   bool quic_ready_{};
   Endpoint reality_cover_{};

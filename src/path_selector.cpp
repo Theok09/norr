@@ -128,7 +128,8 @@ bool PathSelector::evaluate(Instant now) {
     const auto& candidate = paths_[index];
     if (candidate.kind() == active_) continue;
     const auto eligible =
-        candidate.usable() || (must_move && candidate.state() == PathState::probing);
+        candidate.usable() ||
+        (must_move && (candidate.state() == PathState::probing || candidate.retry_due(now)));
     if (!eligible) continue;
     if (best == nullptr || candidate.score() < best->score()) best = &candidate;
   }
@@ -154,7 +155,7 @@ bool PathSelector::evaluate(Instant now) {
   }
 
   if (must_move) {
-    if (auto* leaving = find(active_); leaving != nullptr) leaving->mark_failed();
+    if (auto* leaving = find(active_); leaving != nullptr) leaving->mark_failed(now);
   }
 
   active_ = best->kind();

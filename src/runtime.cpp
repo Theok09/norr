@@ -311,6 +311,7 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
     }
 
     tcp_carrier_ = std::make_unique<TcpCarrier>(tcp_, far, dialing, partner->preshared);
+    tcp_carrier_->set_mark(fwmark_);
     tcp_carrier_->set_connections(
         (!config.reality_private_key.empty() || !config.reality_public_key.empty())
             ? std::uint8_t{1}
@@ -445,6 +446,7 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
         }
       }
       tcp_carrier_ = std::make_unique<TcpCarrier>(tcp_, far, dials, partner->preshared);
+      tcp_carrier_->set_mark(fwmark_);
       tcp_carrier_->set_connections(
         (!config.reality_private_key.empty() || !config.reality_public_key.empty())
             ? std::uint8_t{1}
@@ -695,18 +697,29 @@ void Runtime::send_outgoing(const OutgoingHandshake& outgoing) {
   static_cast<void>(carrier_->send_batch(batch));
 }
 
-void Runtime::send_control(PeerId peer, std::span<const std::byte> payload) {
+void Runtime::send_control(PeerId peer, std::span<const std::byte> payload,
+                           bool every_connection) {
   auto session = sessions_.find_by_peer(peer);
   if (session == nullptr || !session->endpoint().has_value()) return;
 
-  std::array<std::byte, kPacketHeaderSize + 1 + kEchoTokenSize + kAeadTagSize> frame{};
-  const auto sealed = session->seal(FrameType::control, payload, frame);
-  if (!sealed) return;
+  std::size_t copies = 1;
+  if (every_connection) {
+    if (const auto* tcp_carrier = dynamic_cast<const TcpCarrier*>(carrier_);
+        tcp_carrier != nullptr) {
+      copies = std::max<std::size_t>(1, tcp_carrier->ready_count());
+    }
+  }
 
-  const OutboundDatagram datagram{.destination = *session->endpoint(),
-                                  .payload = std::span{frame}.first(*sealed)};
-  const std::array<OutboundDatagram, 1> batch{datagram};
-  static_cast<void>(carrier_->send_batch(batch));
+  for (std::size_t copy = 0; copy < copies; ++copy) {
+    std::array<std::byte, kPacketHeaderSize + 1 + kEchoTokenSize + kAeadTagSize> frame{};
+    const auto sealed = session->seal(FrameType::control, payload, frame);
+    if (!sealed) return;
+    const OutboundDatagram datagram{.destination = *session->endpoint(),
+                                    .payload = std::span{frame}.first(*sealed),
+                                    .flow = static_cast<std::uint32_t>(copy)};
+    const std::array<OutboundDatagram, 1> batch{datagram};
+    static_cast<void>(carrier_->send_batch(batch));
+  }
 }
 
 void Runtime::send_keepalive(PeerId peer) {
@@ -720,7 +733,7 @@ void Runtime::send_keepalive(PeerId peer) {
     payload[1 + index] = static_cast<std::byte>((stamp >> (8 * (7 - index))) & 0xFFU);
   }
 
-  send_control(peer, payload);
+  send_control(peer, payload, true);
 }
 
 void Runtime::answer_echo(PeerId peer, std::span<const std::byte> token) {
@@ -1006,13 +1019,15 @@ void Runtime::evaluate_transport_paths(Instant now) {
   if (now - last_path_check_ < kTransportCheckInterval) return;
   last_path_check_ = now;
 
-  if (active_kind_ == TransportKind::tcp_tls && tcp_carrier_ != nullptr &&
-      !tcp_carrier_->ready()) {
-    return;
-  }
-  if (active_kind_ == TransportKind::quic && quic_carrier_ != nullptr &&
-      !quic_carrier_->ready()) {
-    return;
+  const bool not_ready =
+      (active_kind_ == TransportKind::tcp_tls && tcp_carrier_ != nullptr &&
+       !tcp_carrier_->ready()) ||
+      (active_kind_ == TransportKind::quic && quic_carrier_ != nullptr && !quic_carrier_->ready());
+  if (not_ready) {
+    if (not_ready_since_ == Instant{}) not_ready_since_ = now;
+    if (now - not_ready_since_ < kTransportNotReadyLimit) return;
+  } else {
+    not_ready_since_ = Instant{};
   }
 
   const auto& transport = carrier_->stats();
@@ -1043,7 +1058,7 @@ void Runtime::evaluate_transport_paths(Instant now) {
   }
   const auto stalled = consecutive_stalls_ >= kStallsBeforeFallback;
 
-  const auto failing = stalled || new_errors > 0;
+  const auto failing = not_ready || stalled || new_errors > 0;
   const auto working = !failing;
   if (!failing && !hearing) return;
 
@@ -1056,7 +1071,7 @@ void Runtime::evaluate_transport_paths(Instant now) {
                           .reachable = working};
   paths_.observe(active_kind_, sample);
 
-  if (attempted == 0 && new_errors == 0 && new_retries == 0) return;
+  if (!not_ready && attempted == 0 && new_errors == 0 && new_retries == 0) return;
   if (working && new_errors == 0) return;
 
   if (!paths_.evaluate(now)) return;
@@ -1079,6 +1094,7 @@ void Runtime::evaluate_transport_paths(Instant now) {
   last_tx_errors_ = 0;
   last_retries_ = control_->stats().retries;
   switched_at_ = now;
+  not_ready_since_ = Instant{};
 
   std::fprintf(stderr, "transport: switched to %s\n",
                std::string{transport_kind_name(chosen)}.c_str());

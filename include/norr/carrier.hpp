@@ -18,6 +18,7 @@
 #include "norr/quic_transport.hpp"
 #include "norr/noise.hpp"
 #include "norr/tcp_transport.hpp"
+#include "norr/timers.hpp"
 #include "norr/udp_transport.hpp"
 
 namespace norr {
@@ -179,14 +180,21 @@ class TcpCarrier final : public Carrier {
   void adopt(TcpTransport&& connection) {
     if (extra_.size() + 1 >= target_) return;
     extra_.push_back(std::move(connection));
-    extra_started_.push_back(false);
+    extra_slots_.push_back(ConnectionSlot{});
   }
 
   void reset_all() noexcept;
 
-  void primary_replaced() noexcept { tls_started_ = false; }
+  void primary_replaced() noexcept { primary_slot_ = ConnectionSlot{}; }
 
-  void primary_replaced_started() noexcept { tls_started_ = true; }
+  void primary_replaced_started() noexcept {
+    primary_slot_ = ConnectionSlot{};
+    primary_slot_.started = true;
+  }
+
+  void set_mark(std::uint32_t mark) noexcept { mark_ = mark; }
+
+  [[nodiscard]] std::size_t ready_count() const noexcept;
 
   void reap() noexcept;
 
@@ -199,12 +207,23 @@ class TcpCarrier final : public Carrier {
   }
 
  private:
-  void drive(TcpTransport& transport, bool& tls_started, bool dialing);
+  struct ConnectionSlot {
+    bool started{};
+    Instant phase_since{};
+    Instant next_attempt{};
+    std::uint32_t failures{};
+    Instant last_rx{};
+  };
+
+  [[nodiscard]] bool connection_ready(const TcpTransport& conn) const noexcept;
+  void note_failure(ConnectionSlot& slot, Instant now) noexcept;
+  void drive(TcpTransport& transport, ConnectionSlot& slot, bool dialing, Instant now);
 
   TcpTransport* transport_;
   Endpoint peer_{};
   bool dialing_{};
-  bool tls_started_{};
+  ConnectionSlot primary_slot_{};
+  std::uint32_t mark_{};
   bool camouflage_{};
   std::string sni_{};
   std::vector<std::string> sni_pool_{};
@@ -217,7 +236,7 @@ class TcpCarrier final : public Carrier {
   TransportStats stats_{};
   std::size_t target_{1};
   std::vector<TcpTransport> extra_;
-  std::vector<bool> extra_started_;
+  std::vector<ConnectionSlot> extra_slots_;
 
   enum class RealityMode { off, client, server };
   RealityMode reality_mode_{RealityMode::off};

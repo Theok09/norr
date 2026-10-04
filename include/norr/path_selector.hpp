@@ -7,6 +7,7 @@
 #include <string_view>
 
 #include "norr/rate_limit.hpp"
+#include "norr/timers.hpp"
 
 namespace norr {
 enum class TransportKind : std::uint8_t { udp, quic, tcp_tls, icmp };
@@ -71,9 +72,15 @@ class Path {
 
   [[nodiscard]] double score() const noexcept { return score_; }
 
-  void mark_failed() noexcept {
+  void mark_failed(Instant now) noexcept {
     state_ = PathState::failed;
     good_ = 0;
+    failed_at_ = now;
+  }
+
+  [[nodiscard]] bool retry_due(Instant now) const noexcept {
+    return state_ == PathState::failed && failed_at_ != Instant{} &&
+           now - failed_at_ >= kPathRetryAfter;
   }
 
   [[nodiscard]] std::uint32_t consecutive_good() const noexcept { return good_; }
@@ -88,6 +95,7 @@ class Path {
   std::uint32_t good_{};
   std::uint32_t bad_{};
   bool primed_{};
+  Instant failed_at_{};
 };
 
 struct SelectorStats {

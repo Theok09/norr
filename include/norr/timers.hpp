@@ -49,6 +49,13 @@ inline constexpr auto kKeepaliveInterval = std::chrono::seconds{25};
 
 inline constexpr auto kTcpCarrierSilenceTimeout = std::chrono::seconds{75};
 
+inline constexpr auto kCarrierSetupTimeout = std::chrono::seconds{15};
+inline constexpr auto kCarrierRetryBase = std::chrono::milliseconds{250};
+inline constexpr auto kCarrierRetryMax = std::chrono::seconds{30};
+inline constexpr auto kConnectionSilenceTimeout = std::chrono::seconds{60};
+inline constexpr auto kTransportNotReadyLimit = std::chrono::seconds{30};
+inline constexpr auto kPathRetryAfter = std::chrono::seconds{45};
+
 inline constexpr auto kPrimaryStaleAfter = std::chrono::seconds{30};
 inline constexpr auto kPendingConnectionDeadline = std::chrono::seconds{10};
 inline constexpr std::size_t kMaximumPendingConnections = 16;
