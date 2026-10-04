@@ -42,9 +42,12 @@ enum class PrivilegeError {
 [[nodiscard]] std::expected<void, PrivilegeError> drop_capabilities() noexcept;
 
 [[nodiscard]] std::expected<void, PrivilegeError> drop_privileges(std::string_view username,
-                                                                  bool keep_net_admin) noexcept;
+                                                                  bool keep_net_admin,
+                                                                  bool keep_net_raw = false) noexcept;
 
 [[nodiscard]] bool has_net_admin() noexcept;
+
+[[nodiscard]] bool has_net_raw() noexcept;
 
 [[nodiscard]] std::expected<void, PrivilegeError> check_key_file_permissions(
     const std::string& path) noexcept;

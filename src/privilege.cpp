@@ -46,11 +46,13 @@ std::expected<void, PrivilegeError> drop_capabilities() noexcept {
   return std::unexpected(PrivilegeError::unsupported);
 }
 
-std::expected<void, PrivilegeError> drop_privileges(std::string_view, bool) noexcept {
+std::expected<void, PrivilegeError> drop_privileges(std::string_view, bool, bool) noexcept {
   return std::unexpected(PrivilegeError::unsupported);
 }
 
 bool has_net_admin() noexcept { return false; }
+
+bool has_net_raw() noexcept { return false; }
 
 std::expected<void, PrivilegeError> check_key_file_permissions(const std::string&) noexcept {
   return std::unexpected(PrivilegeError::unsupported);
@@ -85,6 +87,7 @@ std::expected<void, PrivilegeError> set_no_new_privileges() noexcept {
 
 namespace {
 constexpr std::uint32_t kNetAdminBit = 1U << CAP_NET_ADMIN;
+constexpr std::uint32_t kNetRawBit = 1U << CAP_NET_RAW;
 
 [[nodiscard]] bool read_capabilities(std::array<__user_cap_data_struct, 2>& data) noexcept {
   __user_cap_header_struct header{.version = _LINUX_CAPABILITY_VERSION_3, .pid = 0};
@@ -113,6 +116,12 @@ bool has_net_admin() noexcept {
   return (data[0].effective & kNetAdminBit) != 0U;
 }
 
+bool has_net_raw() noexcept {
+  std::array<__user_cap_data_struct, 2> data{};
+  if (!read_capabilities(data)) return false;
+  return (data[0].effective & kNetRawBit) != 0U;
+}
+
 std::expected<void, PrivilegeError> drop_capabilities() noexcept {
   clear_ambient();
   if (!set_capabilities(0)) return std::unexpected(PrivilegeError::capability_failed);
@@ -120,14 +129,18 @@ std::expected<void, PrivilegeError> drop_capabilities() noexcept {
 }
 
 std::expected<void, PrivilegeError> drop_privileges(std::string_view username,
-                                                    bool keep_net_admin) noexcept {
+                                                    bool keep_net_admin,
+                                                    bool keep_net_raw) noexcept {
   std::array<__user_cap_data_struct, 2> current{};
   if (!read_capabilities(current)) return std::unexpected(PrivilegeError::capability_failed);
-  const auto keep = keep_net_admin ? (current[0].permitted & kNetAdminBit) : 0U;
+  std::uint32_t keep = 0U;
+  if (keep_net_admin) keep |= current[0].permitted & kNetAdminBit;
+  if (keep_net_raw) keep |= current[0].permitted & kNetRawBit;
 
   if (running_as_root()) {
     for (unsigned capability = 0; capability < 64; ++capability) {
       if (keep_net_admin && capability == CAP_NET_ADMIN) continue;
+      if (keep_net_raw && capability == CAP_NET_RAW) continue;
       if (::prctl(PR_CAPBSET_DROP, capability, 0, 0, 0) != 0 && errno != EINVAL) {
         return std::unexpected(PrivilegeError::capability_failed);
       }
