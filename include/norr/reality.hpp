@@ -38,4 +38,16 @@ struct RealityServerResult {
     const PrivateKey& server_private, const PublicKey& client_key_share,
     std::span<const std::byte> session_id, std::uint64_t now,
     std::uint64_t window_seconds) noexcept;
+
+inline constexpr std::size_t kRealityAuthSize = 32;
+using RealityAuth = std::array<std::byte, kRealityAuthSize>;
+
+[[nodiscard]] std::expected<RealityAuth, CryptoError> reality_server_auth(
+    const PrivateKey& server_private, const PublicKey& client_key_share,
+    std::span<const std::byte> server_key_share) noexcept;
+
+[[nodiscard]] bool reality_verify_server_auth(
+    const PrivateKey& client_ephemeral_private, const PublicKey& server_static_public,
+    std::span<const std::byte> server_key_share,
+    std::span<const std::byte> claimed_auth) noexcept;
 }

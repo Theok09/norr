@@ -56,6 +56,8 @@ std::uint64_t unix_now() noexcept {
           .count());
 }
 
+}
+
 std::span<const std::byte> extract_key_share_x25519(std::span<const std::byte> record) noexcept {
   const auto rd16 = [](std::span<const std::byte> b, std::size_t o) {
     return (static_cast<std::size_t>(static_cast<std::uint8_t>(b[o])) << 8U) |
@@ -103,6 +105,44 @@ std::span<const std::byte> extract_key_share_x25519(std::span<const std::byte> r
   }
   return {};
 }
+
+std::span<const std::byte> extract_server_key_share(std::span<const std::byte> record) noexcept {
+  const auto rd16 = [](std::span<const std::byte> b, std::size_t o) {
+    return (static_cast<std::size_t>(static_cast<std::uint8_t>(b[o])) << 8U) |
+           static_cast<std::size_t>(static_cast<std::uint8_t>(b[o + 1]));
+  };
+
+  // A ServerHello names one cipher suite as a bare u16 and one compression
+  // byte, where a ClientHello length-prefixes a list of each. Parsing one with
+  // the other's layout reads the cipher id as a list length and walks off the
+  // end, which is why this is a separate function rather than a flag.
+  std::size_t p = kTlsRecordHeaderSize + 4;
+  if (record.size() < p + 2 + kTlsRandomSize + 1) return {};
+  p += 2 + kTlsRandomSize;
+  const auto sid_len = static_cast<std::size_t>(static_cast<std::uint8_t>(record[p]));
+  p += 1 + sid_len;
+  if (record.size() < p + 2 + 1 + 2) return {};
+  p += 2 + 1;
+  const auto ext_total = rd16(record, p);
+  p += 2;
+  const auto ext_end = std::min(record.size(), p + ext_total);
+
+  while (p + 4 <= ext_end) {
+    const auto ext_type = rd16(record, p);
+    const auto ext_len = rd16(record, p + 2);
+    const auto ext_body = p + 4;
+    if (ext_body + ext_len > ext_end) break;
+    if (ext_type == 0x0033) {
+      if (ext_len >= 4 && rd16(record, ext_body) == 0x001d &&
+          rd16(record, ext_body + 2) == kPublicKeySize &&
+          ext_body + 4 + kPublicKeySize <= ext_end) {
+        return record.subspan(ext_body + 4, kPublicKeySize);
+      }
+      return {};
+    }
+    p = ext_body + ext_len;
+  }
+  return {};
 }
 
 std::size_t write_record_header(TlsRecordType type, std::size_t length,
@@ -230,10 +270,16 @@ std::vector<std::byte> build_client_hello(std::string_view server_name,
   return framed_handshake(0x01, body, 0x0301);
 }
 
-std::vector<std::byte> build_server_hello(std::span<const std::byte> session_id) {
+std::vector<std::byte> build_server_hello(std::span<const std::byte> session_id,
+                                          std::span<const std::byte> key_share,
+                                          std::span<const std::byte> auth) {
   std::vector<std::byte> body;
   push_u16(body, 0x0303);
-  push_random(body, kTlsRandomSize);
+  if (auth.size() == kRealityAuthSize) {
+    push_bytes(body, auth);
+  } else {
+    push_random(body, kTlsRandomSize);
+  }
   if (session_id.size() >= 1 && session_id.size() <= 32) {
     push_u8(body, static_cast<std::uint8_t>(session_id.size()));
     push_bytes(body, session_id);
@@ -253,7 +299,11 @@ std::vector<std::byte> build_server_hello(std::span<const std::byte> session_id)
   push_u16(ext, static_cast<std::uint16_t>(kTlsRandomSize + 4));
   push_u16(ext, 0x001d);
   push_u16(ext, static_cast<std::uint16_t>(kTlsRandomSize));
-  push_random(ext, kTlsRandomSize);
+  if (key_share.size() == kTlsRandomSize) {
+    push_bytes(ext, key_share);
+  } else {
+    push_random(ext, kTlsRandomSize);
+  }
 
   push_u16(body, static_cast<std::uint16_t>(ext.size()));
   push_bytes(body, ext);
@@ -331,6 +381,28 @@ std::expected<std::span<const std::byte>, CamouflageError> CamouflageFramer::nex
     }
 
     if (record->type == TlsRecordType::handshake) {
+      if (role_ == Role::client && reality_enabled_ && !reality_server_verified_) {
+        const auto frame = view.first(record->consumed);
+        if (frame.size() > kTlsRecordHeaderSize &&
+            static_cast<std::uint8_t>(frame[kTlsRecordHeaderSize]) == 0x02) {
+          // The auth tag rides in ServerHello.random: thirty-two bytes that an
+          // observer cannot tell from the random they replace. Without this the
+          // client trusts whoever answers, which is the hole an active man in
+          // the middle walks through.
+          constexpr std::size_t kRandomOffset = kTlsRecordHeaderSize + 4 + 2;
+          const auto share = extract_server_key_share(frame);
+          if (frame.size() >= kRandomOffset + kRealityAuthSize &&
+              share.size() == kPublicKeySize) {
+            const auto claimed = frame.subspan(kRandomOffset, kRealityAuthSize);
+            reality_server_verified_ = reality_verify_server_auth(
+                reality_ephemeral_.private_key, reality_server_public_, share, claimed);
+          }
+          if (!reality_server_verified_) {
+            violated_ = true;
+            return std::unexpected(CamouflageError::malformed);
+          }
+        }
+      }
       if (role_ == Role::server && !sent_reply_ && looks_like_client_hello(view)) {
         std::span<const std::byte> session_id{};
         constexpr std::size_t kSessionIdLenOffset = kTlsRecordHeaderSize + 4 + 2 + kTlsRandomSize;
@@ -359,7 +431,29 @@ std::expected<std::span<const std::byte>, CamouflageError> CamouflageFramer::nex
           }
         }
         if (!reality_rejected_) {
-          pending_reply_ = build_server_hello(session_id);
+          std::span<const std::byte> share_bytes{};
+          std::span<const std::byte> auth_bytes{};
+          KeyPair server_share{};
+          RealityAuth auth{};
+
+          if (reality_authenticated_) {
+            const auto key_share = extract_key_share_x25519(view.first(record->consumed));
+            auto generated = generate_keypair();
+            if (generated && key_share.size() == kPublicKeySize) {
+              PublicKey client_share{};
+              std::copy(key_share.begin(), key_share.end(), client_share.begin());
+              server_share = *generated;
+              const auto tag = reality_server_auth(reality_server_private_, client_share,
+                                                   server_share.public_key);
+              if (tag) {
+                auth = *tag;
+                share_bytes = server_share.public_key;
+                auth_bytes = auth;
+              }
+            }
+          }
+
+          pending_reply_ = build_server_hello(session_id, share_bytes, auth_bytes);
           const auto ccs = build_change_cipher_spec();
           pending_reply_.insert(pending_reply_.end(), ccs.begin(), ccs.end());
         }

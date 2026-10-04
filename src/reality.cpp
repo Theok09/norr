@@ -103,4 +103,42 @@ RealityServerResult reality_server_verify(
   std::copy(plain.begin() + 8, plain.end(), result.short_id.begin());
   return result;
 }
+
+namespace {
+constexpr std::string_view kRealityAuthDomain = "norr-reality-server-v1";
+
+[[nodiscard]] RealityAuth auth_tag(const SharedSecret& secret,
+                                   std::span<const std::byte> server_key_share) noexcept {
+  const auto salt = std::as_bytes(std::span{kRealityAuthDomain});
+  const auto digest = hkdf_extract(salt, secret);
+  std::array<std::byte, 32> key{};
+  std::copy(digest.begin(), digest.begin() + 32, key.begin());
+
+  const auto mac = hmac_blake2s(key, server_key_share);
+  RealityAuth tag{};
+  std::copy(mac.begin(), mac.begin() + kRealityAuthSize, tag.begin());
+  return tag;
+}
+}
+
+std::expected<RealityAuth, CryptoError> reality_server_auth(
+    const PrivateKey& server_private, const PublicKey& client_key_share,
+    std::span<const std::byte> server_key_share) noexcept {
+  auto secret = x25519(server_private, client_key_share);
+  if (!secret) return std::unexpected(secret.error());
+  return auth_tag(*secret, server_key_share);
+}
+
+bool reality_verify_server_auth(const PrivateKey& client_ephemeral_private,
+                                const PublicKey& server_static_public,
+                                std::span<const std::byte> server_key_share,
+                                std::span<const std::byte> claimed_auth) noexcept {
+  if (claimed_auth.size() != kRealityAuthSize) return false;
+
+  auto secret = x25519(client_ephemeral_private, server_static_public);
+  if (!secret) return false;
+
+  const auto expected = auth_tag(*secret, server_key_share);
+  return constant_time_equal(claimed_auth, expected);
+}
 }

@@ -61,11 +61,18 @@ struct TlsRecordView {
     std::span<const std::byte> session_id = {});
 
 [[nodiscard]] std::vector<std::byte> build_server_hello(
-    std::span<const std::byte> session_id = {});
+    std::span<const std::byte> session_id = {}, std::span<const std::byte> key_share = {},
+    std::span<const std::byte> auth = {});
 
 [[nodiscard]] std::vector<std::byte> build_change_cipher_spec();
 
 [[nodiscard]] bool looks_like_client_hello(std::span<const std::byte> bytes) noexcept;
+
+[[nodiscard]] std::span<const std::byte> extract_key_share_x25519(
+    std::span<const std::byte> record) noexcept;
+
+[[nodiscard]] std::span<const std::byte> extract_server_key_share(
+    std::span<const std::byte> record) noexcept;
 
 class CamouflageFramer {
  public:
@@ -91,6 +98,10 @@ class CamouflageFramer {
   [[nodiscard]] bool reality_enabled() const noexcept { return reality_enabled_; }
   [[nodiscard]] bool reality_authenticated() const noexcept { return reality_authenticated_; }
   [[nodiscard]] bool reality_rejected() const noexcept { return reality_rejected_; }
+
+  [[nodiscard]] bool reality_server_verified() const noexcept {
+    return reality_server_verified_;
+  }
   [[nodiscard]] std::vector<std::byte> take_fallback_prelude() {
     return std::exchange(fallback_prelude_, {});
   }
@@ -125,6 +136,7 @@ class CamouflageFramer {
 
   bool reality_enabled_{};
   bool reality_authenticated_{};
+  bool reality_server_verified_{};
   bool reality_rejected_{};
   PublicKey reality_server_public_{};
   PrivateKey reality_server_private_{};
