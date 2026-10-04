@@ -14,7 +14,17 @@ LAT_BAD=250
 MARGIN=25
 HOME_TRANSPORT=udp
 declare -A BIAS=( [udp]=0 [icmp]=5 [tcp]=20 [camo]=30 )
+# UDP_ONLY=1 keeps failover on datagram carriers (udp/icmp) only, so a
+# TCP-wide throttle (observed from Iran: TCP collapses while UDP is fine)
+# can never push the tunnel onto a TCP carrier that is being throttled.
+UDP_ONLY=0
+declare -A DATAGRAM=( [udp]=1 [icmp]=1 [tcp]=0 [camo]=0 )
 [ -r "$CONFIG_DIR/failover.conf" ] && . "$CONFIG_DIR/failover.conf"
+if [ "$UDP_ONLY" = 1 ]; then
+  NEW_ORDER=""
+  for t in $ORDER; do [ "${DATAGRAM[$t]:-0}" = 1 ] && NEW_ORDER="$NEW_ORDER $t"; done
+  ORDER="${NEW_ORDER# }"
+fi
 
 exec 9>/run/norr-failover.lock
 flock -n 9 || exit 0
