@@ -3,6 +3,7 @@
 #include "norr/spoof_feedback.hpp"
 
 #include <algorithm>
+#include <ranges>
 #include <utility>
 
 #include "norr/packet.hpp"
@@ -56,6 +57,11 @@ void SpoofFeedback::apply_receipt(std::span<const std::uint64_t> confirmed_bitma
   }
 }
 
+void SpoofFeedback::apply_source_receipt(std::span<const std::byte> frame, Instant now) {
+  const auto sources = decode_source_receipt(frame);
+  apply_receipt(receipt_bitmap_for_pool(sources, pool_), now);
+}
+
 std::uint32_t SpoofFeedback::miss_streak(std::size_t index) const noexcept {
   return index < windows_.size() ? windows_[index].miss_streak : 0;
 }
@@ -103,5 +109,62 @@ std::vector<std::uint64_t> decode_spoof_receipt(std::span<const std::byte> paylo
     bitmap.push_back(value);
   }
   return bitmap;
+}
+
+void SpoofReceiptTracker::observe(std::uint32_t source_be) noexcept {
+  if (source_be == 0) return;
+  if (seen_.size() >= kSpoofReceiptMaxWords * 64) return;
+  if (std::ranges::find(seen_, source_be) != seen_.end()) return;
+  seen_.push_back(source_be);
+}
+
+std::vector<std::byte> SpoofReceiptTracker::drain_receipt() noexcept {
+  auto frame = encode_source_receipt(seen_);
+  seen_.clear();
+  return frame;
+}
+
+std::vector<std::byte> encode_source_receipt(std::span<const std::uint32_t> sources_be) {
+  const auto count = std::min<std::size_t>(sources_be.size(), kSpoofReceiptMaxWords * 64);
+  std::vector<std::byte> out;
+  out.reserve(1 + count * 4);
+  out.push_back(kSpoofReceipt);
+  for (std::size_t i = 0; i < count; ++i) {
+    for (int shift = 24; shift >= 0; shift -= 8) {
+      out.push_back(static_cast<std::byte>((sources_be[i] >> static_cast<unsigned>(shift)) & 0xFFU));
+    }
+  }
+  return out;
+}
+
+std::vector<std::uint32_t> decode_source_receipt(std::span<const std::byte> payload) {
+  std::vector<std::uint32_t> sources;
+  if (payload.empty() || payload[0] != kSpoofReceipt) return sources;
+  const auto body = payload.subspan(1);
+  const auto count = std::min<std::size_t>(body.size() / 4, kSpoofReceiptMaxWords * 64);
+  sources.reserve(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    std::uint32_t value = 0;
+    for (std::size_t b = 0; b < 4; ++b) {
+      value = (value << 8U) | static_cast<std::uint32_t>(body[i * 4 + b]);
+    }
+    sources.push_back(value);
+  }
+  return sources;
+}
+
+std::vector<std::uint64_t> receipt_bitmap_for_pool(std::span<const std::uint32_t> sources_be,
+                                                   const SpoofPool& pool) {
+  std::vector<std::size_t> indices;
+  indices.reserve(sources_be.size());
+  for (const auto ip : sources_be) {
+    for (std::size_t index = 0; index < pool.size(); ++index) {
+      if (pool.source(index) == ip) {
+        indices.push_back(index);
+        break;
+      }
+    }
+  }
+  return make_receipt_bitmap(indices, pool.size());
 }
 }

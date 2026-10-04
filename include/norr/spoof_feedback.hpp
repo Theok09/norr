@@ -29,6 +29,8 @@ class SpoofFeedback {
 
   void apply_receipt(std::span<const std::uint64_t> confirmed_bitmap, Instant now) noexcept;
 
+  void apply_source_receipt(std::span<const std::byte> frame, Instant now);
+
   [[nodiscard]] std::size_t healthy_count(Instant now) const noexcept {
     return pool_.healthy_count(now);
   }
@@ -59,4 +61,23 @@ class SpoofFeedback {
 [[nodiscard]] std::vector<std::byte> encode_spoof_receipt(std::span<const std::uint64_t> bitmap);
 
 [[nodiscard]] std::vector<std::uint64_t> decode_spoof_receipt(std::span<const std::byte> payload);
+
+class SpoofReceiptTracker {
+ public:
+  void observe(std::uint32_t source_be) noexcept;
+
+  [[nodiscard]] std::vector<std::byte> drain_receipt() noexcept;
+
+  [[nodiscard]] std::size_t pending() const noexcept { return seen_.size(); }
+
+ private:
+  std::vector<std::uint32_t> seen_;
+};
+
+[[nodiscard]] std::vector<std::byte> encode_source_receipt(std::span<const std::uint32_t> sources_be);
+
+[[nodiscard]] std::vector<std::uint32_t> decode_source_receipt(std::span<const std::byte> payload);
+
+[[nodiscard]] std::vector<std::uint64_t> receipt_bitmap_for_pool(
+    std::span<const std::uint32_t> sources_be, const SpoofPool& pool);
 }

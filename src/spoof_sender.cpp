@@ -69,7 +69,10 @@ std::expected<std::size_t, SpoofSendError> SpoofSender::send_batch(
       const auto offset = prepared * kMaxPacket;
       const auto region = std::span{scratch_}.subspan(offset, kMaxPacket);
       const auto length = build_into(datagram, region);
-      if (length == 0) continue;
+      if (length == 0) {
+        ++dropped_oversized_;
+        continue;
+      }
 
       addrs[prepared].sin_family = AF_INET;
       addrs[prepared].sin_port = htons(datagram.destination_port);

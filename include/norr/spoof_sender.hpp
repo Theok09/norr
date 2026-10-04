@@ -48,8 +48,11 @@ class SpoofSender {
   [[nodiscard]] std::size_t build_into(const SpoofDatagram& datagram,
                                        std::span<std::byte> out) const noexcept;
 
+  [[nodiscard]] std::uint64_t dropped_oversized() const noexcept { return dropped_oversized_; }
+
  private:
   FileDescriptor socket_;
   std::vector<std::byte> scratch_;
+  std::uint64_t dropped_oversized_{};
 };
 }

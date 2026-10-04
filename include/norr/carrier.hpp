@@ -61,6 +61,10 @@ class UdpCarrier final : public Carrier {
 
   [[nodiscard]] bool spoofing() const noexcept { return spoofing_; }
 
+  [[nodiscard]] std::uint64_t spoof_dropped_oversized() const noexcept {
+    return sender_.dropped_oversized();
+  }
+
   void apply_spoof_receipt(std::span<const std::uint64_t> bitmap, Instant now) noexcept {
     if (spoofing_) feedback_.apply_receipt(bitmap, now);
   }

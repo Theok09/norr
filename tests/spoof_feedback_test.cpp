@@ -126,6 +126,54 @@ void test_receipt_decode_caps_words() {
   std::puts("spoof_feedback: receipt decode caps words against oversized frame OK");
 }
 
+void test_source_receipt_roundtrip_and_tracker() {
+  norr::SpoofReceiptTracker tracker;
+  tracker.observe(ip(10, 0, 0, 1));
+  tracker.observe(ip(10, 0, 0, 2));
+  tracker.observe(ip(10, 0, 0, 1));
+  tracker.observe(0);
+  NORR_CHECK(tracker.pending() == 2);
+  const auto frame = tracker.drain_receipt();
+  NORR_CHECK(tracker.pending() == 0);
+  NORR_CHECK(frame[0] == norr::kSpoofReceipt);
+  const auto decoded = norr::decode_source_receipt(frame);
+  NORR_CHECK(decoded.size() == 2);
+  NORR_CHECK(decoded[0] == ip(10, 0, 0, 1));
+  NORR_CHECK(decoded[1] == ip(10, 0, 0, 2));
+  std::puts("spoof_feedback: receipt tracker dedups, drains, roundtrips source IPs OK");
+}
+
+void test_apply_source_receipt_drives_health() {
+  norr::SpoofFeedback fb{pool_of(3), {.miss_windows = 1}};
+  norr::Instant now{};
+  const auto first = fb.pick(0x1234, now);
+  NORR_CHECK(first.has_value());
+
+  norr::SpoofReceiptTracker tracker;
+  tracker.observe(first->source_be);
+  const auto good = tracker.drain_receipt();
+  for (int i = 0; i < 5; ++i) {
+    static_cast<void>(fb.pick(0x1234, now));
+    fb.apply_source_receipt(good, now);
+  }
+  NORR_CHECK(fb.healthy_count(now) == 3);
+
+  const auto empty = norr::encode_source_receipt(std::vector<std::uint32_t>{});
+  static_cast<void>(fb.pick(0x1234, now));
+  fb.apply_source_receipt(empty, now);
+  NORR_CHECK(fb.healthy_count(now) == 2);
+  std::puts("spoof_feedback: apply_source_receipt rewards seen and blames missing OK");
+}
+
+void test_source_receipt_caps_and_rejects() {
+  std::vector<std::byte> huge(1 + 8000 * 4, std::byte{0xAB});
+  huge[0] = norr::kSpoofReceipt;
+  NORR_CHECK(norr::decode_source_receipt(huge).size() <= norr::kSpoofReceiptMaxWords * 64);
+  const std::vector<std::byte> bad{std::byte{0x02}, std::byte{0}};
+  NORR_CHECK(norr::decode_source_receipt(bad).empty());
+  std::puts("spoof_feedback: source receipt decode caps and rejects wrong tag OK");
+}
+
 void test_randomized_feedback_loop() {
   norr::SpoofFeedback fb{pool_of(12), {.miss_windows = 3,
                                        .reroll_interval = std::chrono::seconds{5}}};
@@ -163,6 +211,9 @@ int main() {
   test_receipt_frame_roundtrip();
   test_receipt_frame_rejects_bad_tag();
   test_receipt_decode_caps_words();
+  test_source_receipt_roundtrip_and_tracker();
+  test_apply_source_receipt_drives_health();
+  test_source_receipt_caps_and_rejects();
   test_randomized_feedback_loop();
   std::puts("spoof_feedback: all tests passed");
   return 0;
