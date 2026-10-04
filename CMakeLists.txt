@@ -74,6 +74,7 @@ add_library(norr_core
     src/routing.cpp
     src/session.cpp
     src/spooftest.cpp
+    src/spooftest_cli.cpp
     src/timers.cpp
     src/tls.cpp
     src/tun.cpp

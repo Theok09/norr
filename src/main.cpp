@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "norr/config.hpp"
 #include "norr/crypto.hpp"
@@ -13,6 +14,7 @@
 #include "norr/privilege.hpp"
 #include "norr/quic_transport.hpp"
 #include "norr/runtime.hpp"
+#include "norr/spooftest_cli.hpp"
 #include "norr/tls.hpp"
 #include "norr/tun.hpp"
 #include "norr/udp_transport.hpp"
@@ -272,6 +274,11 @@ int main(int argc, char* argv[]) {
   if (command == "keygen") return argc == 2 ? keygen() : wrong_usage("keygen");
   if (command == "features") return argc == 2 ? features() : wrong_usage("features");
   if (command == "hardening") return argc == 2 ? hardening() : wrong_usage("hardening");
+  if (command == "spooftest") {
+    std::vector<std::string> args;
+    for (int i = 2; i < argc; ++i) args.emplace_back(argv[i]);
+    return norr::spooftest_main(args);
+  }
 
   std::fprintf(stderr, "unknown command: %s\n", argv[1]);
   return usage();
