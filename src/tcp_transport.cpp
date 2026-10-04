@@ -381,9 +381,6 @@ std::expected<std::size_t, TransportError> TcpTransport::send_frame(
   if (!drained) return std::unexpected(drained.error());
 
   if (camo_.has_value()) {
-    // Real backpressure only when the backlog is already large: otherwise the
-    // frame is queued and flushed on the next poll rather than dropped, which
-    // is what starved a bulk flow to zero.
     if (!*drained && outbox_.size() >= kTcpOutboxLimit) {
       return std::unexpected(TransportError::would_block);
     }
@@ -492,14 +489,9 @@ std::expected<std::size_t, TransportError> TcpTransport::receive_frames(
   if (state_ != TcpState::connected) return std::unexpected(TransportError::not_started);
   if (out.empty()) return std::size_t{0};
 
-  if (read_buffer_.size() < 16384) read_buffer_.resize(16384);
+  if (read_buffer_.size() < 65536) read_buffer_.resize(65536);
 
   if (camo_.has_value()) {
-    // Only pull from the kernel when the parsed queue is drained. Reading the
-    // whole socket into the framer every call while handing back just out.size()
-    // frames moves the backlog into an unbounded userspace buffer and defeats
-    // TCP flow control; under latency that buffer grows until the flow stalls.
-    // Leaving unread bytes in the socket lets TCP apply backpressure instead.
     if (ready_head_ >= ready_.size()) {
       ready_.clear();
       ready_head_ = 0;
@@ -518,8 +510,6 @@ std::expected<std::size_t, TransportError> TcpTransport::receive_frames(
         }
         camo_->feed(std::span{read_buffer_}.first(static_cast<std::size_t>(received)));
         stats_.bytes_received += static_cast<std::uint64_t>(received);
-        // Parse what we have; stop reading once a healthy batch is queued so a
-        // burst does not pull the whole window into memory at once.
         while (true) {
           const auto payload = camo_->next_payload();
           if (!payload) break;

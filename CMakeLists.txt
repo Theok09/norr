@@ -73,6 +73,10 @@ add_library(norr_core
     src/runtime.cpp
     src/routing.cpp
     src/session.cpp
+    src/spoof_pool.cpp
+    src/spoof_feedback.cpp
+    src/spoof_envelope.cpp
+    src/spoof_sender.cpp
     src/spooftest.cpp
     src/spooftest_cli.cpp
     src/timers.cpp
@@ -267,6 +271,18 @@ if(NORR_BUILD_TESTS)
     add_executable(norr_spooftest_tests tests/spooftest_test.cpp)
     target_link_libraries(norr_spooftest_tests PRIVATE norr_core tests_support)
     add_test(NAME norr_spooftest_tests COMMAND norr_spooftest_tests)
+    add_executable(norr_spoof_pool_tests tests/spoof_pool_test.cpp)
+    target_link_libraries(norr_spoof_pool_tests PRIVATE norr_core tests_support)
+    add_test(NAME norr_spoof_pool_tests COMMAND norr_spoof_pool_tests)
+    add_executable(norr_spoof_feedback_tests tests/spoof_feedback_test.cpp)
+    target_link_libraries(norr_spoof_feedback_tests PRIVATE norr_core tests_support)
+    add_test(NAME norr_spoof_feedback_tests COMMAND norr_spoof_feedback_tests)
+    add_executable(norr_spoof_envelope_tests tests/spoof_envelope_test.cpp)
+    target_link_libraries(norr_spoof_envelope_tests PRIVATE norr_core tests_support)
+    add_test(NAME norr_spoof_envelope_tests COMMAND norr_spoof_envelope_tests)
+    add_executable(norr_spoof_sender_tests tests/spoof_sender_test.cpp)
+    target_link_libraries(norr_spoof_sender_tests PRIVATE norr_core tests_support)
+    add_test(NAME norr_spoof_sender_tests COMMAND norr_spoof_sender_tests)
 
     add_executable(norr_session_tests tests/session_test.cpp)
     target_link_libraries(norr_session_tests PRIVATE norr_core tests_support)
