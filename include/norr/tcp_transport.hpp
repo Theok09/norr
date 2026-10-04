@@ -21,6 +21,7 @@
 namespace norr {
 inline constexpr std::size_t kTcpLengthPrefixSize = 2;
 inline constexpr std::size_t kMaximumTcpFrame = 65535;
+inline constexpr std::size_t kTcpOutboxLimit = 4U * 1024U * 1024U;
 
 enum class TcpState { closed, connecting, connected, failed };
 

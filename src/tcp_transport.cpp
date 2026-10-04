@@ -379,16 +379,23 @@ std::expected<std::size_t, TransportError> TcpTransport::send_frame(
 
   const auto drained = flush_output();
   if (!drained) return std::unexpected(drained.error());
-  if (!*drained) return std::unexpected(TransportError::would_block);
 
   if (camo_.has_value()) {
+    // Real backpressure only when the backlog is already large: otherwise the
+    // frame is queued and flushed on the next poll rather than dropped, which
+    // is what starved a bulk flow to zero.
+    if (!*drained && outbox_.size() >= kTcpOutboxLimit) {
+      return std::unexpected(TransportError::would_block);
+    }
     auto wrapped = camo_->wrap(frame);
     std::size_t written = 0;
-    while (written < wrapped.size()) {
-      const auto sent = write_some(std::span{wrapped}.subspan(written));
-      if (!sent) return std::unexpected(sent.error());
-      if (*sent == 0) break;
-      written += *sent;
+    if (*drained) {
+      while (written < wrapped.size()) {
+        const auto sent = write_some(std::span{wrapped}.subspan(written));
+        if (!sent) return std::unexpected(sent.error());
+        if (*sent == 0) break;
+        written += *sent;
+      }
     }
     if (written < wrapped.size()) {
       outbox_.insert(outbox_.end(),
@@ -398,6 +405,8 @@ std::expected<std::size_t, TransportError> TcpTransport::send_frame(
     ++stats_.frames_sent;
     return frame.size();
   }
+
+  if (!*drained) return std::unexpected(TransportError::would_block);
 
   record_.resize(kTcpLengthPrefixSize + frame.size());
   record_[0] = static_cast<std::byte>((frame.size() >> 8U) & 0xFFU);
