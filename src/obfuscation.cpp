@@ -33,6 +33,7 @@ void Obfuscator::configure(const ObfuscationConfig& config,
 
   junk_pos_ = sizeof(junk_pool_);
   junk_ready_ = config_.junk_padding && config_.junk_max > 0;
+  nonce_pos_ = sizeof(nonce_pool_);
 }
 
 std::byte Obfuscator::next_junk_byte() noexcept {
@@ -47,6 +48,18 @@ std::byte Obfuscator::next_junk_byte() noexcept {
 }
 
 void Obfuscator::next_nonce(std::span<std::byte> out) noexcept {
+  if (nonce_pos_ + kObfuscationNonceSize > nonce_pool_.size()) {
+    if (random_bytes(nonce_pool_)) {
+      nonce_pos_ = 0;
+    }
+  }
+  if (nonce_pos_ + kObfuscationNonceSize <= nonce_pool_.size()) {
+    std::copy(nonce_pool_.begin() + static_cast<std::ptrdiff_t>(nonce_pos_),
+              nonce_pool_.begin() + static_cast<std::ptrdiff_t>(nonce_pos_ + kObfuscationNonceSize),
+              out.begin());
+    nonce_pos_ += kObfuscationNonceSize;
+    return;
+  }
   auto value = nonce_counter_++;
   value += 0x9E3779B97F4A7C15ULL;
   value = (value ^ (value >> 30U)) * 0xBF58476D1CE4E5B9ULL;

@@ -118,6 +118,8 @@ class Obfuscator {
   std::array<std::byte, 4096> junk_pool_{};
   std::size_t junk_pos_{sizeof(junk_pool_)};
   bool junk_ready_{};
+  std::array<std::byte, 4096> nonce_pool_{};
+  std::size_t nonce_pos_{sizeof(nonce_pool_)};
   std::vector<std::byte> unwrap_scratch_{};
 };
 }
