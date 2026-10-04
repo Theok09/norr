@@ -79,7 +79,8 @@ std::expected<std::size_t, ObfuscationError> Obfuscator::wrap(
   }
 
   std::size_t junk_length = 0;
-  if (config_.junk_padding && config_.junk_max > 0) {
+  if (config_.junk_padding && config_.junk_max > 0 &&
+      nonce_counter_ <= kJunkPacketWindow) {
     std::array<std::byte, 1> pick{};
     if (random_bytes(pick)) {
       junk_length = static_cast<std::size_t>(pick[0]) % (config_.junk_max + 1U);

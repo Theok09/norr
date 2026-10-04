@@ -76,6 +76,8 @@ struct ObfuscationConfig {
 [[nodiscard]] ObfuscationKey derive_obfuscation_key(
     const PresharedKey& preshared) noexcept;
 
+inline constexpr std::uint64_t kJunkPacketWindow = 64;
+
 class Obfuscator {
  public:
   Obfuscator() = default;
