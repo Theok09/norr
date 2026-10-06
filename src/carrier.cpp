@@ -140,7 +140,7 @@ std::expected<std::size_t, TransportError> DnsCarrier::send_batch(
     slot.assign(framer_.envelope_size() + payload.size(), std::byte{0});
     const auto framed = framer_.wrap(payload, slot);
     if (!framed) continue;
-    wrap_batch_.push_back(OutboundDatagram{.destination = peer_,
+    wrap_batch_.push_back(OutboundDatagram{.destination = datagrams[index].destination,
                                            .payload = std::span{slot}.first(*framed),
                                            .flow = datagrams[index].flow});
   }
