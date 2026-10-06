@@ -81,6 +81,16 @@ void truncated_wire_rejected() {
   NORR_CHECK(!result.has_value());
 }
 
+void malformed_label_rejected() {
+  norr::DnsFramer server;
+  server.configure(norr::DnsRole::server, "mail.example.com");
+  std::vector<std::byte> wire(40, std::byte{0});
+  wire[12] = std::byte{0x40};
+  std::vector<std::byte> back(2048);
+  const auto result = server.unwrap(wire, back);
+  NORR_CHECK(!result.has_value());
+}
+
 void oversized_payload_rejected() {
   norr::DnsFramer client;
   client.configure(norr::DnsRole::client, "x");
@@ -96,6 +106,7 @@ int main() {
   round_trip_server_to_client();
   empty_payload_survives();
   truncated_wire_rejected();
+  malformed_label_rejected();
   oversized_payload_rejected();
   std::printf("dns_framer tests passed\n");
   return 0;

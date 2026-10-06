@@ -76,14 +76,24 @@ std::expected<std::size_t, DnsFramerError> DnsFramer::unwrap(
     std::span<const std::byte> wire, std::span<std::byte> out) const noexcept {
   if (wire.size() < kDnsHeaderSize) return std::unexpected(DnsFramerError::malformed);
   std::size_t pos = kDnsHeaderSize;
+  bool terminated = false;
   while (pos < wire.size()) {
     const auto label = static_cast<std::size_t>(static_cast<std::uint8_t>(wire[pos]));
     ++pos;
-    if (label == 0) break;
+    if (label == 0) {
+      terminated = true;
+      break;
+    }
+    if (label > kDnsLabelMaxSize || pos + label > wire.size()) {
+      return std::unexpected(DnsFramerError::malformed);
+    }
     pos += label;
   }
+  if (!terminated) return std::unexpected(DnsFramerError::malformed);
+  if (pos + kDnsQuestionTrailerSize + kDnsPayloadLengthSize > wire.size()) {
+    return std::unexpected(DnsFramerError::malformed);
+  }
   pos += kDnsQuestionTrailerSize;
-  if (pos + kDnsPayloadLengthSize > wire.size()) return std::unexpected(DnsFramerError::malformed);
   const auto length = static_cast<std::size_t>(get_u16(wire, pos));
   pos += kDnsPayloadLengthSize;
   if (pos + length > wire.size()) return std::unexpected(DnsFramerError::malformed);
