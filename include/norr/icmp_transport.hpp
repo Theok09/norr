@@ -60,6 +60,8 @@ class IcmpTransport {
   [[nodiscard]] std::expected<void, TransportError> set_mark(std::uint32_t mark);
 
   void set_identifier(std::uint16_t identifier) noexcept { identifier_ = identifier; }
+
+  void set_echo_request_only(bool on) noexcept { echo_request_only_ = on; }
   [[nodiscard]] int descriptor() const noexcept { return socket_.get(); }
 
   [[nodiscard]] std::expected<std::size_t, TransportError> send_batch(
@@ -74,6 +76,7 @@ class IcmpTransport {
   FileDescriptor socket_;
   [[maybe_unused]] Role role_{Role::client};
   [[maybe_unused]] AddressFamily family_{AddressFamily::ipv4};
+  bool echo_request_only_{};
   [[maybe_unused]] std::uint16_t identifier_{kNorrIcmpId};
   [[maybe_unused]] std::uint16_t sequence_{};
   TransportStats stats_{};

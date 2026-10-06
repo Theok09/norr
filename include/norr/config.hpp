@@ -51,8 +51,8 @@ struct ConfigDiagnostic {
 };
 
 enum class NodeRole { server, client };
-enum class TransportMode { automatic, udp, quic, tcp_tls, icmp };
-enum class CamouflageMode { off, fake_tls, pop3 };
+enum class TransportMode { automatic, udp, quic, tcp_tls, icmp, ipip, gre, esp, ah, ospf };
+enum class CamouflageMode { off, fake_tls, pop3, smtp, xmpp, raw };
 
 inline constexpr std::uint16_t kMinimumMtu = 1280;
 inline constexpr std::uint16_t kMaximumMtu = 9000;
@@ -105,12 +105,17 @@ struct Config {
 
   bool qos_enabled{false};
   std::uint64_t qos_rate_bytes{};
+  std::uint64_t brutal_rate_bytes{};
   std::uint64_t qos_burst_bytes{};
   FecMode fec{FecMode::off};
   ObfuscationConfig obfuscation{};
+  bool icmp_echo_request_only{true};
+  bool icmp_silence_kernel{false};
   bool spoof_enabled{false};
   std::vector<std::uint32_t> spoof_sources;
   TrafficProfile profile{TrafficProfile::standard};
+  std::string log_level{"info"};
+  std::string tuning_profile{"off"};
   bool metrics_enabled{false};
   std::string metrics_listen;
   std::string tun_name{"norr0"};

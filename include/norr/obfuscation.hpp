@@ -70,6 +70,7 @@ struct ObfuscationConfig {
   ObfuscationMode mode{ObfuscationMode::off};
   bool junk_padding{false};
   bool priming{false};
+  bool uniform_length{false};
   std::uint8_t junk_max{64};
   std::uint16_t length_bucket{256};
 };

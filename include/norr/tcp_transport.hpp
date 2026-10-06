@@ -69,6 +69,42 @@ class FrameReassembler {
   bool violated_{};
 };
 
+enum class GreetProfile : std::uint8_t { pop3, smtp, xmpp };
+
+struct GreetScript {
+  std::string_view greeting;
+  std::string_view client_reply;
+  std::string_view server_ack;
+  std::string_view client_final;
+  std::string_view server_final;
+};
+
+[[nodiscard]] constexpr GreetScript greet_script(GreetProfile profile) noexcept {
+  switch (profile) {
+    case GreetProfile::smtp:
+      return GreetScript{.greeting = "220 mail.example.com ESMTP Postfix\r\n",
+                         .client_reply = "EHLO localhost\r\n",
+                         .server_ack = "250-mail.example.com\r\n",
+                         .client_final = "MAIL FROM:<norr@localhost>\r\n",
+                         .server_final = "250 2.1.0 Ok\r\n"};
+    case GreetProfile::xmpp:
+      return GreetScript{
+          .greeting = "<stream:stream xmlns='jabber:client' "
+                      "xmlns:stream='http://etherx.jabber.org/streams' version='1.0'>\r\n",
+          .client_reply = "<?xml version='1.0'?><stream:stream to='example.com' "
+                          "xmlns='jabber:client' version='1.0'>\r\n",
+          .server_ack = "<stream:features/>\r\n",
+          .client_final = "<iq type='get' id='n1'><ping xmlns='urn:xmpp:ping'/></iq>\r\n",
+          .server_final = "<iq type='result' id='n1'/>\r\n"};
+    case GreetProfile::pop3: break;
+  }
+  return GreetScript{.greeting = "+OK POP3 ready\r\n",
+                     .client_reply = "USER norr\r\n",
+                     .server_ack = "+OK\r\n",
+                     .client_final = "PASS norr\r\n",
+                     .server_final = "+OK logged in\r\n"};
+}
+
 class TcpTransport {
  public:
   [[nodiscard]] static bool supported() noexcept;
@@ -132,7 +168,8 @@ class TcpTransport {
 
   [[nodiscard]] std::expected<bool, TransportError> poll_camouflage();
 
-  [[nodiscard]] std::expected<void, TransportError> enable_pop3(bool client);
+  [[nodiscard]] std::expected<void, TransportError> enable_pop3(bool client,
+                                                            GreetProfile profile);
 
   [[nodiscard]] bool pop3_enabled() const noexcept { return pop3_active_; }
 
@@ -185,6 +222,7 @@ class TcpTransport {
   bool pop3_client_{};
   std::size_t pop3_step_{};
   std::vector<std::byte> pop3_inbox_;
+  GreetProfile pop3_profile_{GreetProfile::pop3};
   enum class RealityMode { off, client, server };
   RealityMode reality_mode_{RealityMode::off};
   PublicKey reality_server_public_{};

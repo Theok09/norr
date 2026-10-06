@@ -1,6 +1,9 @@
 // Norr — encrypted layer 3 tunnel. Copyright (C) 2026 Theok09.
 // Licensed under the GNU AGPL v3 or later. See LICENSE.
+#include "norr/log.hpp"
 #include "norr/runtime.hpp"
+
+#include "norr/tuning.hpp"
 
 #include <algorithm>
 #include <array>
@@ -29,6 +32,28 @@
 #include "norr/privilege.hpp"
 
 namespace norr {
+namespace {
+constexpr const char* kEchoIgnoreKnob = "/proc/sys/net/ipv4/icmp_echo_ignore_all";
+
+[[nodiscard]] bool read_echo_ignore(char& out) noexcept {
+  FILE* file = std::fopen(kEchoIgnoreKnob, "re");
+  if (file == nullptr) return false;
+  const int value = std::fgetc(file);
+  static_cast<void>(std::fclose(file));
+  if (value == EOF) return false;
+  out = static_cast<char>(value);
+  return true;
+}
+
+bool write_echo_ignore(char value) noexcept {
+  FILE* file = std::fopen(kEchoIgnoreKnob, "we");
+  if (file == nullptr) return false;
+  static_cast<void>(std::fputc(value, file));
+  static_cast<void>(std::fputc('\n', file));
+  return std::fclose(file) == 0;
+}
+}
+
 namespace {
 using Diagnostic = RuntimeDiagnostic;
 
@@ -122,7 +147,13 @@ std::expected<PrivateKey, RuntimeError> load_private_key(const std::string& path
   return key;
 }
 
-Runtime::~Runtime() { stop(); }
+Runtime::~Runtime() {
+  stop();
+  if (echo_ignore_restore_ != 0) {
+    static_cast<void>(write_echo_ignore(echo_ignore_restore_));
+    echo_ignore_restore_ = 0;
+  }
+}
 
 std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
   if (!TunDevice::supported() || !UdpTransport::supported()) {
@@ -130,6 +161,11 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
   }
   if (!crypto_available() || !crypto_init()) {
     return std::unexpected(Diagnostic{RuntimeError::crypto_unavailable, {}});
+  }
+
+  if (const auto profile = parse_tuning_profile(config.tuning_profile);
+      profile != TuningProfile::off) {
+    static_cast<void>(apply_kernel_tuning(profile));
   }
 
   const auto private_key = load_private_key(config.identity_key_file);
@@ -303,8 +339,15 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
                      "configure a single peer or use udp"});
     }
     const bool camouflaged = config.camouflage == CamouflageMode::fake_tls;
-    const bool pop3 = config.camouflage == CamouflageMode::pop3;
-    if (!camouflaged && !pop3 && !tls_available()) {
+    const bool pop3 = config.camouflage == CamouflageMode::pop3 ||
+                      config.camouflage == CamouflageMode::smtp ||
+                      config.camouflage == CamouflageMode::xmpp;
+    const auto greet = config.camouflage == CamouflageMode::smtp
+                           ? GreetProfile::smtp
+                           : (config.camouflage == CamouflageMode::xmpp ? GreetProfile::xmpp
+                                                                        : GreetProfile::pop3);
+    const bool raw = config.camouflage == CamouflageMode::raw;
+    if (!camouflaged && !pop3 && !raw && !tls_available()) {
       return std::unexpected(Diagnostic{RuntimeError::option_not_implemented,
                                         "transport.mode = tcp-tls needs a TLS backend"});
     }
@@ -326,8 +369,17 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
         (!config.reality_private_key.empty() || !config.reality_public_key.empty())
             ? std::uint8_t{1}
             : config.tcp_connections);
-    if (pop3) {
-      tcp_carrier_->set_pop3();
+    if (raw) {
+      tcp_carrier_->set_raw();
+      auto raw_obfuscation = config.obfuscation;
+      if (raw_obfuscation.mode == ObfuscationMode::off) {
+        raw_obfuscation.mode = ObfuscationMode::full;
+        raw_obfuscation.junk_padding = true;
+        if (raw_obfuscation.junk_max == 0) raw_obfuscation.junk_max = 96;
+      }
+      tcp_carrier_->configure_obfuscation(raw_obfuscation, partner->preshared);
+    } else if (pop3) {
+      tcp_carrier_->set_pop3(greet);
       auto pop3_obfuscation = config.obfuscation;
       if (pop3_obfuscation.mode == ObfuscationMode::off) {
         pop3_obfuscation.mode = ObfuscationMode::full;
@@ -415,6 +467,13 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
       if (id == 0) id = 1;
       icmp_transport_.set_identifier(id);
     }
+    icmp_transport_.set_echo_request_only(config.icmp_echo_request_only);
+    if (config.icmp_silence_kernel) {
+      char previous = '0';
+      if (read_echo_ignore(previous) && previous != '1' && write_echo_ignore('1')) {
+        echo_ignore_restore_ = previous;
+      }
+    }
     const auto far = partner->endpoint.has_value() ? *partner->endpoint : *bind_address;
     icmp_carrier_ = std::make_unique<IcmpCarrier>(icmp_transport_, far);
     auto icmp_obfuscation = config.obfuscation;
@@ -425,6 +484,81 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
     if (config.role == NodeRole::client) icmp_carrier_->prime();
     carrier_ = icmp_carrier_.get();
     active_kind_ = TransportKind::icmp;
+  } else if (config.transport == TransportMode::ipip ||
+             config.transport == TransportMode::gre ||
+             config.transport == TransportMode::esp ||
+             config.transport == TransportMode::ah ||
+             config.transport == TransportMode::ospf) {
+    const auto raw_proto = [&] {
+      switch (config.transport) {
+        case TransportMode::gre: return RawProto::gre;
+        case TransportMode::esp: return RawProto::esp;
+        case TransportMode::ah: return RawProto::ah;
+        case TransportMode::ospf: return RawProto::ospf;
+        default: return RawProto::ipip;
+      }
+    }();
+    const auto raw_transport_kind = [&] {
+      switch (config.transport) {
+        case TransportMode::gre: return TransportKind::gre;
+        case TransportMode::esp: return TransportKind::esp;
+        case TransportMode::ah: return TransportKind::ah;
+        case TransportMode::ospf: return TransportKind::ospf;
+        default: return TransportKind::ipip;
+      }
+    }();
+    const PeerConfig* partner = nullptr;
+    for (PeerId peer = 1; peer <= peer_count_; ++peer) {
+      const auto* candidate = control_->find_peer(peer);
+      if (candidate == nullptr) continue;
+      partner = candidate;
+      if (candidate->endpoint.has_value()) break;
+    }
+    if (partner == nullptr) {
+      return std::unexpected(Diagnostic{RuntimeError::control_failed,
+                                        "transport.mode = ipip/gre needs a configured peer"});
+    }
+    if (peer_count_ > 1) {
+      return std::unexpected(Diagnostic{
+          RuntimeError::option_not_implemented,
+          "transport.mode = ipip/gre carries one peer per socket; configure a single peer"});
+    }
+    if (!RawProtoTransport::supported()) {
+      return std::unexpected(
+          Diagnostic{RuntimeError::option_not_implemented,
+                     "transport.mode = ipip/gre/esp/ah/ospf needs the Linux raw-socket backend"});
+    }
+    const auto role = config.role == NodeRole::client ? RawProtoTransport::Role::client
+                                                      : RawProtoTransport::Role::server;
+    rawproto_transport_ = RawProtoTransport{raw_proto};
+    const auto raw_addr = parse_address("0.0.0.0");
+    if (!raw_addr) return std::unexpected(Diagnostic{RuntimeError::bind_failed, "raw-proto"});
+    if (const auto ok = rawproto_transport_.start(Endpoint{*raw_addr, 0}, role); !ok) {
+      return std::unexpected(Diagnostic{RuntimeError::bind_failed,
+                                        std::string{transport_error_message(ok.error())}});
+    }
+    if (fwmark_ != 0) static_cast<void>(rawproto_transport_.set_mark(fwmark_));
+    {
+      const auto domain = std::as_bytes(std::span{std::string_view{"norr-rawproto-tag-v1"}});
+      const auto digest = Blake2s::hash(domain, partner->preshared);
+      auto tag = static_cast<std::uint16_t>(
+          (static_cast<unsigned>(static_cast<std::uint8_t>(digest[0])) << 8U) |
+          static_cast<unsigned>(static_cast<std::uint8_t>(digest[1])));
+      if (tag == 0) tag = 1;
+      rawproto_transport_.set_tag(tag);
+    }
+    const auto far = partner->endpoint.has_value() ? *partner->endpoint : *bind_address;
+    const auto raw_kind =
+        raw_transport_kind;
+    rawproto_carrier_ = std::make_unique<RawProtoCarrier>(rawproto_transport_, far, raw_kind);
+    auto raw_obfuscation = config.obfuscation;
+    if (raw_obfuscation.mode == ObfuscationMode::off) {
+      raw_obfuscation.mode = ObfuscationMode::header_mask;
+    }
+    rawproto_carrier_->configure_obfuscation(raw_obfuscation, partner->preshared);
+    if (config.role == NodeRole::client) rawproto_carrier_->prime();
+    carrier_ = rawproto_carrier_.get();
+    active_kind_ = raw_kind;
   } else {
     udp_carrier_ = std::make_unique<UdpCarrier>(transport_);
     if (config.obfuscation.mode != ObfuscationMode::off) {
@@ -461,8 +595,15 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
                          : Endpoint{};
 
     const bool camouflaged = config.camouflage == CamouflageMode::fake_tls;
-    const bool pop3 = config.camouflage == CamouflageMode::pop3;
-    if (partner != nullptr && (camouflaged || pop3 || tls_available())) {
+    const bool pop3 = config.camouflage == CamouflageMode::pop3 ||
+                      config.camouflage == CamouflageMode::smtp ||
+                      config.camouflage == CamouflageMode::xmpp;
+    const auto greet = config.camouflage == CamouflageMode::smtp
+                           ? GreetProfile::smtp
+                           : (config.camouflage == CamouflageMode::xmpp ? GreetProfile::xmpp
+                                                                        : GreetProfile::pop3);
+    const bool raw = config.camouflage == CamouflageMode::raw;
+    if (partner != nullptr && (camouflaged || pop3 || raw || tls_available())) {
       if (!dials) {
         if (const auto listening = tcp_listener_.listen(*bind_address); !listening) {
           return std::unexpected(
@@ -476,8 +617,17 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
         (!config.reality_private_key.empty() || !config.reality_public_key.empty())
             ? std::uint8_t{1}
             : config.tcp_connections);
-      if (pop3) {
-        tcp_carrier_->set_pop3();
+      if (raw) {
+        tcp_carrier_->set_raw();
+        auto raw_obfuscation = config.obfuscation;
+        if (raw_obfuscation.mode == ObfuscationMode::off) {
+          raw_obfuscation.mode = ObfuscationMode::full;
+          raw_obfuscation.junk_padding = true;
+          if (raw_obfuscation.junk_max == 0) raw_obfuscation.junk_max = 96;
+        }
+        tcp_carrier_->configure_obfuscation(raw_obfuscation, partner->preshared);
+      } else if (pop3) {
+        tcp_carrier_->set_pop3(greet);
         auto pop3_obfuscation = config.obfuscation;
         if (pop3_obfuscation.mode == ObfuscationMode::off) {
           pop3_obfuscation.mode = ObfuscationMode::full;
@@ -561,6 +711,16 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
     CongestionConfig tuning{};
     tuning.maximum_rate_bytes = static_cast<double>(config.qos_rate_bytes);
     congestion_ = CongestionController{tuning, static_cast<double>(config.qos_rate_bytes)};
+    congestion_enabled_ = true;
+  } else if (config.brutal_rate_bytes > 0) {
+    const auto brutal = static_cast<double>(config.brutal_rate_bytes);
+    const auto burst = config.brutal_rate_bytes / 8 + kMaximumMtu;
+    worker_->enable_queueing(brutal, burst, std::chrono::steady_clock::now());
+
+    CongestionConfig tuning{};
+    tuning.brutal_rate_bytes = brutal;
+    tuning.maximum_rate_bytes = brutal * 4.0;
+    congestion_ = CongestionController{tuning, brutal};
     congestion_enabled_ = true;
   }
 
@@ -896,8 +1056,7 @@ void Runtime::service_tcp_carrier(Instant now) {
       tcp_ready_ = false;
       tcp_ready_since_ = Instant{};
       ++tcp_silence_resets_;
-      std::fprintf(stderr, "tcp carrier: peer silent, reconnecting\n");
-      std::fflush(stderr);
+      NORR_LOG_WARN("tcp carrier: peer silent, reconnecting");
     }
   }
 }
@@ -953,8 +1112,7 @@ void Runtime::drive_pending(Instant now) {
         tcp_accepted_at_ = now;
         tcp_ready_ = false;
         tcp_carrier->primary_replaced_started();
-        std::fprintf(stderr, "tcp carrier: authenticated reconnect took over\n");
-        std::fflush(stderr);
+        NORR_LOG_WARN("tcp carrier: authenticated reconnect took over");
         drop = true;
       } else if (!conn.connected() || expired) {
         drop = true;
@@ -971,8 +1129,7 @@ void Runtime::drive_pending(Instant now) {
         tcp_accepted_at_ = now;
         tcp_ready_ = false;
         tcp_carrier->primary_replaced();
-        std::fprintf(stderr, "tcp carrier: replaced stale primary\n");
-        std::fflush(stderr);
+        NORR_LOG_WARN("tcp carrier: replaced stale primary");
         drop = true;
       } else if (expired) {
         drop = true;
@@ -1102,6 +1259,11 @@ void Runtime::evaluate_transport_paths(Instant now) {
     case TransportKind::tcp_tls: next = tcp_carrier_.get(); break;
     case TransportKind::quic: next = quic_carrier_.get(); break;
     case TransportKind::icmp: next = icmp_carrier_.get(); break;
+    case TransportKind::ipip:
+    case TransportKind::gre:
+    case TransportKind::esp:
+    case TransportKind::ah:
+    case TransportKind::ospf: next = rawproto_carrier_.get(); break;
   }
   if (next == nullptr) return;
 
@@ -1113,10 +1275,7 @@ void Runtime::evaluate_transport_paths(Instant now) {
   switched_at_ = now;
   not_ready_since_ = Instant{};
 
-  std::fprintf(stderr, "transport: switched to %s\n",
-               std::string{transport_kind_name(chosen)}.c_str());
-
-  std::fflush(stderr);
+  NORR_LOG_WARN("transport: switched to %s", std::string{transport_kind_name(chosen)}.c_str());
 
   for (PeerId peer = 1; peer <= peer_count_; ++peer) {
     auto session = sessions_.find_by_peer(peer);
@@ -1196,6 +1355,7 @@ void Runtime::wait_for_work(Instant now) {
   watch(tun_.descriptor());
   watch(transport_.descriptor());
   if (icmp_transport_.started()) watch(icmp_transport_.descriptor());
+  if (rawproto_transport_.started()) watch(rawproto_transport_.descriptor());
   if (tcp_.connected()) {
     watch(tcp_.descriptor());
     if (tcp_.has_pending_output()) watched.back().events |= POLLOUT;

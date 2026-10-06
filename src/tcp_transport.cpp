@@ -206,7 +206,7 @@ std::expected<void, TransportError> TcpTransport::enable_camouflage(CamouflageFr
   return std::unexpected(TransportError::unsupported_platform);
 }
 
-std::expected<void, TransportError> TcpTransport::enable_pop3(bool) {
+std::expected<void, TransportError> TcpTransport::enable_pop3(bool, GreetProfile) {
   return std::unexpected(TransportError::unsupported_platform);
 }
 
@@ -500,7 +500,8 @@ void append_str(std::vector<std::byte>& out, std::string_view text) {
 }
 }
 
-std::expected<void, TransportError> TcpTransport::enable_pop3(bool client) {
+std::expected<void, TransportError> TcpTransport::enable_pop3(bool client,
+                                                             GreetProfile profile) {
   if (!socket_.valid()) return std::unexpected(TransportError::not_started);
   if (tls_.has_value() || camo_.has_value() || pop3_active_) {
     return std::unexpected(TransportError::already_started);
@@ -508,10 +509,11 @@ std::expected<void, TransportError> TcpTransport::enable_pop3(bool client) {
   pop3_active_ = true;
   pop3_ready_ = false;
   pop3_client_ = client;
+  pop3_profile_ = profile;
   pop3_step_ = 0;
   pop3_inbox_.clear();
   if (!client) {
-    append_str(outbox_, "+OK POP3 ready\r\n");
+    append_str(outbox_, greet_script(profile).greeting);
   }
   return {};
 }
@@ -561,14 +563,15 @@ std::expected<bool, TransportError> TcpTransport::poll_pop3() {
     return lines;
   };
 
+  const auto script = greet_script(pop3_profile_);
   if (pop3_client_) {
     if (pop3_step_ == 0 && count_lines() >= 1) {
-      append_str(outbox_, "USER norr\r\n");
+      append_str(outbox_, script.client_reply);
       pop3_step_ = 1;
       pop3_inbox_.clear();
     }
     if (pop3_step_ == 1 && count_lines() >= 1) {
-      append_str(outbox_, "PASS norr\r\n");
+      append_str(outbox_, script.client_final);
       pop3_step_ = 2;
       pop3_inbox_.clear();
     }
@@ -578,12 +581,12 @@ std::expected<bool, TransportError> TcpTransport::poll_pop3() {
     }
   } else {
     if (pop3_step_ == 0 && count_lines() >= 1) {
-      append_str(outbox_, "+OK\r\n");
+      append_str(outbox_, script.server_ack);
       pop3_step_ = 1;
       pop3_inbox_.clear();
     }
     if (pop3_step_ == 1 && count_lines() >= 1) {
-      append_str(outbox_, "+OK logged in\r\n");
+      append_str(outbox_, script.server_final);
       pop3_step_ = 2;
       pop3_ready_ = true;
       pop3_inbox_.clear();

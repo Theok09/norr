@@ -13,6 +13,7 @@
 
 #include "norr/endpoint.hpp"
 #include "norr/icmp_transport.hpp"
+#include "norr/rawproto_transport.hpp"
 #include "norr/spoof_feedback.hpp"
 #include "norr/spoof_sender.hpp"
 #include "norr/obfuscation.hpp"
@@ -148,6 +149,43 @@ class IcmpCarrier final : public Carrier {
   bool priming_pending_{};
 };
 
+class RawProtoCarrier final : public Carrier {
+ public:
+  RawProtoCarrier(RawProtoTransport& transport, const Endpoint& peer, TransportKind kind) noexcept
+      : transport_(&transport), peer_(peer), kind_(kind) {}
+
+  void configure_obfuscation(const ObfuscationConfig& config, const PresharedKey& preshared) {
+    obfuscator_.configure(config, preshared);
+  }
+  void prime() noexcept { priming_pending_ = obfuscator_.config().priming; }
+
+  [[nodiscard]] TransportKind kind() const noexcept override { return kind_; }
+
+  [[nodiscard]] std::expected<std::size_t, TransportError> send_batch(
+      std::span<const OutboundDatagram> datagrams) override;
+
+  [[nodiscard]] std::expected<std::size_t, TransportError> receive_batch(
+      ReceiveBuffers& buffers, std::span<InboundDatagram> out) override;
+
+  [[nodiscard]] const TransportStats& stats() const noexcept override { return transport_->stats(); }
+
+  [[nodiscard]] std::size_t max_payload() const noexcept override {
+    const auto base = RawProtoTransport::kDefaultDatagramSize;
+    const auto overhead = obfuscator_.max_overhead() + kEspHeaderSize + 2U;
+    return overhead < base ? base - overhead : base;
+  }
+
+ private:
+  RawProtoTransport* transport_;
+  Endpoint peer_{};
+  TransportKind kind_{TransportKind::gre};
+  Obfuscator obfuscator_{};
+  std::vector<std::vector<std::byte>> wrap_slots_;
+  std::vector<OutboundDatagram> wrap_batch_;
+  std::vector<std::vector<std::byte>> unwrap_slots_;
+  bool priming_pending_{};
+};
+
 class TcpCarrier final : public Carrier {
  public:
 
@@ -177,7 +215,12 @@ class TcpCarrier final : public Carrier {
     sni_ = std::move(server_name);
   }
 
-  void set_pop3() noexcept { pop3_ = true; }
+  void set_pop3(GreetProfile profile = GreetProfile::pop3) noexcept {
+    pop3_ = true;
+    greet_profile_ = profile;
+  }
+
+  void set_raw() noexcept { raw_ = true; }
 
   void set_sni_pool(std::vector<std::string> pool) {
     if (pool.empty()) return;
@@ -203,7 +246,8 @@ class TcpCarrier final : public Carrier {
 
   [[nodiscard]] bool ready() const noexcept {
     return transport_->connected() &&
-           (pop3_ ? transport_->pop3_established() : transport_->tls_established());
+           (raw_ ? true
+                 : (pop3_ ? transport_->pop3_established() : transport_->tls_established()));
   }
 
   void set_connections(std::size_t count) {
@@ -261,6 +305,8 @@ class TcpCarrier final : public Carrier {
   std::uint32_t mark_{};
   bool camouflage_{};
   bool pop3_{};
+  GreetProfile greet_profile_{GreetProfile::pop3};
+  bool raw_{};
   std::string sni_{};
   std::vector<std::string> sni_pool_{};
   std::size_t sni_index_{};

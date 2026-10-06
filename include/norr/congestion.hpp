@@ -27,6 +27,8 @@ struct CongestionConfig {
   double maximum_rate_bytes{1'250'000'000.0};
 
   Duration minimum_rtt_window{std::chrono::seconds{10}};
+
+  double brutal_rate_bytes{0.0};
 };
 
 enum class CongestionAction : std::uint8_t { hold, probe, back_off_delay, back_off_loss };

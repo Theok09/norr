@@ -31,9 +31,12 @@ namespace {
 #endif
 
 #if defined(NORR_AEAD_OPENSSL)
+#if !defined(NORR_AEAD_CIPHER_NAME)
+#define NORR_AEAD_CIPHER_NAME "ChaCha20-Poly1305"
+#endif
 class AeadContexts {
  public:
-  AeadContexts() : cipher_(EVP_CIPHER_fetch(nullptr, "ChaCha20-Poly1305", nullptr)) {}
+  AeadContexts() : cipher_(EVP_CIPHER_fetch(nullptr, NORR_AEAD_CIPHER_NAME, nullptr)) {}
 
   AeadContexts(const AeadContexts&) = delete;
   AeadContexts& operator=(const AeadContexts&) = delete;

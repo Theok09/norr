@@ -120,8 +120,12 @@ std::expected<std::size_t, ObfuscationError> Obfuscator::wrap(
       const std::size_t base_len = kJunkLengthFieldSize + plaintext.size();
       const std::size_t to_bucket = (bucket - (base_len % bucket)) % bucket;
       const std::size_t floor = to_bucket <= cap ? to_bucket : 0U;
-      const std::size_t span = cap - floor + 1U;
-      junk_length = floor + static_cast<std::size_t>(entropy % span);
+      if (config_.uniform_length) {
+        junk_length = floor;
+      } else {
+        const std::size_t span = cap - floor + 1U;
+        junk_length = floor + static_cast<std::size_t>(entropy % span);
+      }
     }
   }
 

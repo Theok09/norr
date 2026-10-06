@@ -37,6 +37,7 @@ add_library(norr_core
     src/camouflage.cpp
     src/carrier.cpp
     src/config.cpp
+    src/tuning.cpp
     src/congestion.cpp
     src/bench.cpp
     src/control_plane.cpp
@@ -50,6 +51,7 @@ add_library(norr_core
     src/handshake_frame.cpp
     src/io_backend.cpp
     src/icmp_transport.cpp
+    src/rawproto_transport.cpp
     src/ip_packet.cpp
     src/key_schedule.cpp
     src/load_monitor.cpp
@@ -182,6 +184,37 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(norr_core PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror)
 endif()
 
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
+option(NORR_NATIVE "Tune the build for the host CPU (-march=native)" OFF)
+
+set(NORR_AEAD_CIPHER "chacha20-poly1305" CACHE STRING "AEAD cipher: chacha20-poly1305 or aes-256-gcm")
+if(NORR_AEAD_CIPHER STREQUAL "aes-256-gcm")
+    target_compile_definitions(norr_core PUBLIC NORR_AEAD_CIPHER_NAME="AES-256-GCM")
+elseif(NORR_AEAD_CIPHER STREQUAL "chacha20-poly1305")
+    target_compile_definitions(norr_core PUBLIC NORR_AEAD_CIPHER_NAME="ChaCha20-Poly1305")
+else()
+    message(FATAL_ERROR "NORR_AEAD_CIPHER must be chacha20-poly1305 or aes-256-gcm")
+endif()
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(norr_core PRIVATE
+        $<$<CONFIG:Release>:-O3>
+        $<$<CONFIG:Release>:-fno-plt>)
+    if(NORR_NATIVE)
+        target_compile_options(norr_core PRIVATE -march=native -mtune=native)
+    endif()
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT norr_ipo_ok OUTPUT norr_ipo_msg)
+    if(norr_ipo_ok)
+        set_property(TARGET norr_core PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+    else()
+        message(STATUS "LTO unsupported: ${norr_ipo_msg}")
+    endif()
+endif()
+
 if(NORR_ENABLE_SANITIZERS)
     if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
         message(FATAL_ERROR "Sanitizers currently require Clang or GCC")
@@ -208,6 +241,15 @@ endif()
 add_executable(norrd src/main.cpp)
 target_link_libraries(norrd PRIVATE norr_core)
 target_compile_definitions(norrd PRIVATE NORR_VERSION="${PROJECT_VERSION}")
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(norrd PRIVATE $<$<CONFIG:Release>:-O3>)
+    if(NORR_NATIVE)
+        target_compile_options(norrd PRIVATE -march=native -mtune=native)
+    endif()
+    if(norr_ipo_ok)
+        set_property(TARGET norrd PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+    endif()
+endif()
 if(NORR_STATIC)
     target_link_options(norrd PRIVATE -static)
     set_target_properties(norrd PROPERTIES LINK_SEARCH_START_STATIC ON LINK_SEARCH_END_STATIC ON)

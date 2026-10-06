@@ -7,6 +7,8 @@
 #include <string_view>
 #include <vector>
 
+#include "norr/tuning.hpp"
+#include "norr/log.hpp"
 #include "norr/config.hpp"
 #include "norr/crypto.hpp"
 #include "norr/notify.hpp"
@@ -87,6 +89,9 @@ int run(const std::string& path) {
     std::fputc('\n', stderr);
     return 1;
   }
+
+  norr::Log::set_level(norr::parse_log_level(config->log_level));
+  static_cast<void>(norr::apply_kernel_tuning(norr::parse_tuning_profile(config->tuning_profile)));
 
   norr::Runtime runtime;
   runtime.set_config_path(path);

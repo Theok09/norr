@@ -183,8 +183,10 @@ class Runtime {
   [[nodiscard]] Instant primary_heard();
 
   IcmpTransport icmp_transport_;
+  RawProtoTransport rawproto_transport_;
   std::unique_ptr<UdpCarrier> udp_carrier_;
   std::unique_ptr<IcmpCarrier> icmp_carrier_;
+  std::unique_ptr<RawProtoCarrier> rawproto_carrier_;
   std::unique_ptr<TcpCarrier> tcp_carrier_;
   std::unique_ptr<QuicCarrier> quic_carrier_;
   PathSelector paths_;
@@ -214,6 +216,7 @@ class Runtime {
   Instant last_loss_report_{};
   bool fec_configured_{};
   std::atomic<bool> running_{false};
+  char echo_ignore_restore_{};
 };
 
 [[nodiscard]] std::expected<PrivateKey, RuntimeError> load_private_key(const std::string& path);

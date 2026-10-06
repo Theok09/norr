@@ -14,6 +14,24 @@
 
 namespace norr {
 namespace {
+[[nodiscard]] bool carries_datagrams(TransportMode mode) noexcept {
+  switch (mode) {
+    case TransportMode::automatic:
+    case TransportMode::udp:
+    case TransportMode::icmp:
+    case TransportMode::ipip:
+    case TransportMode::gre:
+    case TransportMode::esp:
+    case TransportMode::ah:
+    case TransportMode::ospf: return true;
+    case TransportMode::quic:
+    case TransportMode::tcp_tls: break;
+  }
+  return false;
+}
+}
+
+namespace {
 using Diagnostic = ConfigDiagnostic;
 
 [[nodiscard]] std::string_view trim(std::string_view text) noexcept {
@@ -130,7 +148,8 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       }
       section = std::string{trim(line.substr(1, line.size() - 2))};
       static const std::unordered_set<std::string> known{
-          "node", "identity", "network", "transport", "qos", "fec", "observability"};
+          "node", "identity", "network",       "transport",
+          "qos",  "fec",      "observability", "congestion"};
       if (!known.contains(section)) {
         return std::unexpected(Diagnostic{ConfigError::unknown_section, line_number, section});
       }
@@ -283,6 +302,11 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       else if (value == "quic") config.transport = TransportMode::quic;
       else if (value == "tcp-tls") config.transport = TransportMode::tcp_tls;
       else if (value == "icmp") config.transport = TransportMode::icmp;
+      else if (value == "ipip") config.transport = TransportMode::ipip;
+      else if (value == "gre") config.transport = TransportMode::gre;
+      else if (value == "esp") config.transport = TransportMode::esp;
+      else if (value == "ah") config.transport = TransportMode::ah;
+      else if (value == "ospf") config.transport = TransportMode::ospf;
       else return fail(ConfigError::invalid_value);
     } else if (qualified == "qos.enabled") {
       const auto flag = parse_bool(value);
@@ -298,6 +322,11 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       if (!burst) return fail(burst.error());
       if (*burst == 0) return fail(ConfigError::value_out_of_range);
       config.qos_burst_bytes = *burst;
+    } else if (qualified == "congestion.brutal_rate_bytes") {
+      const auto rate = parse_uint(value);
+      if (!rate) return fail(rate.error());
+      if (*rate == 0) return fail(ConfigError::value_out_of_range);
+      config.brutal_rate_bytes = *rate;
     } else if (qualified == "transport.connections") {
       const auto count = parse_uint(value);
       if (!count) return fail(count.error());
@@ -317,6 +346,10 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       const auto flag = parse_bool(value);
       if (!flag) return fail(flag.error());
       config.obfuscation.junk_padding = *flag;
+    } else if (qualified == "transport.uniform_length") {
+      const auto flag = parse_bool(value);
+      if (!flag) return fail(flag.error());
+      config.obfuscation.uniform_length = *flag;
     } else if (qualified == "transport.junk_max") {
       const auto max = parse_uint(value);
       if (!max) return fail(max.error());
@@ -326,6 +359,25 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       const auto flag = parse_bool(value);
       if (!flag) return fail(flag.error());
       config.obfuscation.priming = *flag;
+    } else if (qualified == "node.log_level") {
+      if (value != "debug" && value != "info" && value != "warn" && value != "error" &&
+          value != "off") {
+        return fail(ConfigError::invalid_value);
+      }
+      config.log_level = value;
+    } else if (qualified == "node.tuning") {
+      if (value != "off" && value != "balanced" && value != "throughput" && value != "saver") {
+        return fail(ConfigError::invalid_value);
+      }
+      config.tuning_profile = value;
+    } else if (qualified == "transport.icmp_echo_request_only") {
+      const auto flag = parse_bool(value);
+      if (!flag) return fail(flag.error());
+      config.icmp_echo_request_only = *flag;
+    } else if (qualified == "transport.icmp_silence_kernel") {
+      const auto flag = parse_bool(value);
+      if (!flag) return fail(flag.error());
+      config.icmp_silence_kernel = *flag;
     } else if (qualified == "transport.spoof") {
       const auto flag = parse_bool(value);
       if (!flag) return fail(flag.error());
@@ -349,6 +401,9 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       if (value == "off") config.camouflage = CamouflageMode::off;
       else if (value == "fake-tls") config.camouflage = CamouflageMode::fake_tls;
       else if (value == "pop3") config.camouflage = CamouflageMode::pop3;
+      else if (value == "smtp") config.camouflage = CamouflageMode::smtp;
+      else if (value == "xmpp") config.camouflage = CamouflageMode::xmpp;
+      else if (value == "raw") config.camouflage = CamouflageMode::raw;
       else return fail(ConfigError::invalid_value);
     } else if (qualified == "transport.sni") {
       if (value.empty() || value.size() > 2048) return fail(ConfigError::invalid_value);
@@ -498,11 +553,11 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
                                       "transport.junk requires transport.obfuscation = full"});
   }
   if (config.obfuscation.mode != ObfuscationMode::off &&
-      config.transport != TransportMode::automatic &&
-      config.transport != TransportMode::udp &&
-      config.transport != TransportMode::icmp) {
-    return std::unexpected(Diagnostic{ConfigError::incompatible_options, 0,
-                                      "transport.obfuscation applies to the udp or icmp transport"});
+      !carries_datagrams(config.transport)) {
+    return std::unexpected(Diagnostic{
+        ConfigError::incompatible_options, 0,
+        "transport.obfuscation applies to the datagram transports (udp, icmp, ipip, gre, esp, "
+        "ah, ospf)"});
   }
 
   if (config.camouflage != CamouflageMode::off &&

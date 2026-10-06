@@ -56,6 +56,14 @@ void CongestionController::observe(const DeliverySample& sample, Instant now) {
   loss_fraction_ = total > 0 ? static_cast<double>(sample.bytes_lost) / static_cast<double>(total)
                              : 0.0;
 
+  if (config_.brutal_rate_bytes > 0.0) {
+    const auto deliverable = std::clamp(1.0 - loss_fraction_, 0.2, 1.0);
+    rate_ = config_.brutal_rate_bytes / deliverable;
+    rate_ = std::clamp(rate_, config_.minimum_rate_bytes, config_.maximum_rate_bytes);
+    last_action_ = CongestionAction::hold;
+    return;
+  }
+
   const auto queueing = queueing_delay();
 
   const auto tolerance = std::min<Duration>(rtt_variance_ * 2, config_.maximum_jitter_tolerance);

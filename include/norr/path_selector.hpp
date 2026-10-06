@@ -10,7 +10,7 @@
 #include "norr/timers.hpp"
 
 namespace norr {
-enum class TransportKind : std::uint8_t { udp, quic, tcp_tls, icmp };
+enum class TransportKind : std::uint8_t { udp, quic, tcp_tls, icmp, ipip, gre, esp, ah, ospf };
 
 [[nodiscard]] constexpr std::string_view transport_kind_name(TransportKind kind) noexcept {
   switch (kind) {
@@ -18,6 +18,11 @@ enum class TransportKind : std::uint8_t { udp, quic, tcp_tls, icmp };
     case TransportKind::quic: return "quic";
     case TransportKind::tcp_tls: return "tcp-tls";
     case TransportKind::icmp: return "icmp";
+    case TransportKind::ipip: return "ipip";
+    case TransportKind::gre: return "gre";
+    case TransportKind::esp: return "esp";
+    case TransportKind::ah: return "ah";
+    case TransportKind::ospf: return "ospf";
   }
   return "unknown";
 }

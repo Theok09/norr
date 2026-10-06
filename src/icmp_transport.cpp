@@ -142,9 +142,9 @@ std::expected<std::size_t, TransportError> IcmpTransport::send_batch(
   const bool v6 = family_ == AddressFamily::ipv6;
   std::uint8_t type;
   if (v6) {
-    type = role_ == Role::client ? kIcmp6EchoRequest : kIcmp6EchoReply;
+    type = (echo_request_only_ || role_ == Role::client) ? kIcmp6EchoRequest : kIcmp6EchoReply;
   } else {
-    type = role_ == Role::client ? kIcmpEchoRequest : kIcmpEchoReply;
+    type = (echo_request_only_ || role_ == Role::client) ? kIcmpEchoRequest : kIcmpEchoReply;
   }
 
   std::size_t sent = 0;
@@ -203,9 +203,9 @@ std::expected<std::size_t, TransportError> IcmpTransport::receive_batch(
   const bool v6 = family_ == AddressFamily::ipv6;
   std::uint8_t want;
   if (v6) {
-    want = role_ == Role::client ? kIcmp6EchoReply : kIcmp6EchoRequest;
+    want = (echo_request_only_ || role_ != Role::client) ? kIcmp6EchoRequest : kIcmp6EchoReply;
   } else {
-    want = role_ == Role::client ? kIcmpEchoReply : kIcmpEchoRequest;
+    want = (echo_request_only_ || role_ != Role::client) ? kIcmpEchoRequest : kIcmpEchoReply;
   }
   std::size_t received = 0;
   const auto limit = std::min(out.size(), buffers.count());

@@ -1,5 +1,6 @@
 // Norr — encrypted layer 3 tunnel. Copyright (C) 2026 Theok09.
 // Licensed under the GNU AGPL v3 or later. See LICENSE.
+#include "norr/log.hpp"
 #include "norr/carrier.hpp"
 
 #include <algorithm>
@@ -66,11 +67,10 @@ std::expected<std::size_t, TransportError> UdpCarrier::send_spoofed(
   bool unspoofable = false;
   for (const auto& datagram : datagrams) {
     const auto& address = datagram.destination.address();
-    const auto pick = (datagram.spoofable && address.family() == AddressFamily::ipv4)
-                          ? feedback_.pick(datagram.flow, now)
-                          : std::nullopt;
+    const bool spoofable_v4 = datagram.spoofable && address.family() == AddressFamily::ipv4;
+    const auto pick = spoofable_v4 ? feedback_.pick(datagram.flow, now) : std::nullopt;
     if (!pick) {
-      if (datagram.spoofable) {
+      if (spoofable_v4) {
         unspoofable = true;
         ++spoof_undeliverable_;
       } else {
@@ -187,8 +187,72 @@ std::expected<std::size_t, TransportError> IcmpCarrier::receive_batch(
   return kept;
 }
 
+std::expected<std::size_t, TransportError> RawProtoCarrier::send_batch(
+    std::span<const OutboundDatagram> datagrams) {
+  const auto dest = [&](const OutboundDatagram& d) { return d.destination; };
+
+  if (priming_pending_ && !datagrams.empty() && obfuscator_.enabled()) {
+    priming_pending_ = false;
+    std::array<std::byte, kPrimingMaxSize> scratch{};
+    std::array<std::byte, 1> pick{};
+    std::size_t count = kPrimingMinPackets;
+    if (random_bytes(pick)) {
+      count += static_cast<std::size_t>(pick[0]) % (kPrimingMaxPackets - kPrimingMinPackets + 1U);
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+      const auto size = obfuscator_.generate_priming(scratch);
+      if (!size) break;
+      const std::array<OutboundDatagram, 1> wire{
+          OutboundDatagram{.destination = dest(datagrams.front()),
+                           .payload = std::span{scratch}.first(*size)}};
+      static_cast<void>(transport_->send_batch(wire));
+    }
+  }
+
+  if (!obfuscator_.enabled()) return transport_->send_batch(datagrams);
+
+  wrap_slots_.resize(datagrams.size());
+  wrap_batch_.clear();
+  wrap_batch_.reserve(datagrams.size());
+  for (std::size_t i = 0; i < datagrams.size(); ++i) {
+    auto& slot = wrap_slots_[i];
+    slot.assign(datagrams[i].payload.size() + obfuscator_.max_overhead(), std::byte{0});
+    const auto wrapped = obfuscator_.wrap(datagrams[i].payload, slot);
+    if (!wrapped) continue;
+    wrap_batch_.push_back(OutboundDatagram{.destination = datagrams[i].destination,
+                                           .payload = std::span{slot}.first(*wrapped)});
+  }
+  if (wrap_batch_.empty()) return std::size_t{0};
+  const auto sent = transport_->send_batch(wrap_batch_);
+  if (!sent) return std::unexpected(sent.error());
+  return std::min(*sent, datagrams.size());
+}
+
+std::expected<std::size_t, TransportError> RawProtoCarrier::receive_batch(
+    ReceiveBuffers& buffers, std::span<InboundDatagram> out) {
+  const auto received = transport_->receive_batch(buffers, out);
+  if (!received) return received;
+
+  std::size_t kept = 0;
+  if (obfuscator_.enabled()) unwrap_slots_.resize(out.size());
+  for (std::size_t i = 0; i < *received; ++i) {
+    const Endpoint source{out[i].source.address(), peer_.port()};
+    if (obfuscator_.enabled()) {
+      auto& slot = unwrap_slots_[kept];
+      slot.assign(out[i].payload.size(), std::byte{0});
+      const auto plain = obfuscator_.unwrap(out[i].payload, slot);
+      if (!plain) continue;
+      out[kept] = InboundDatagram{.source = source, .payload = std::span{slot}.first(*plain)};
+    } else {
+      out[kept] = InboundDatagram{.source = source, .payload = out[i].payload};
+    }
+    ++kept;
+  }
+  return kept;
+}
+
 bool TcpCarrier::connection_ready(const TcpTransport& conn) const noexcept {
-  return conn.connected() && (pop3_ ? conn.pop3_established() : conn.tls_established());
+  return conn.connected() && (raw_ ? true : (pop3_ ? conn.pop3_established() : conn.tls_established()));
 }
 
 std::size_t TcpCarrier::ready_count() const noexcept {
@@ -247,8 +311,7 @@ void TcpCarrier::drive(TcpTransport& transport, ConnectionSlot& slot, bool diali
     if (now - slot.last_rx > kConnectionSilenceTimeout) {
       transport.close();
       note_failure(slot, now);
-      std::fprintf(stderr, "tcp carrier: connection silent, reconnecting\n");
-      std::fflush(stderr);
+      NORR_LOG_WARN("tcp carrier: connection silent, reconnecting");
       return;
     }
     slot.failures = 0;
@@ -267,9 +330,15 @@ void TcpCarrier::drive(TcpTransport& transport, ConnectionSlot& slot, bool diali
 
   if (!transport.connected()) return;
 
+  if (raw_) {
+    slot.started = true;
+    if (transport.has_pending_output()) static_cast<void>(transport.flush_output());
+    return;
+  }
+
   if (pop3_) {
     if (!slot.started) {
-      if (transport.enable_pop3(dialing)) {
+      if (transport.enable_pop3(dialing, greet_profile_)) {
         slot.started = true;
       } else {
         return;
@@ -389,7 +458,7 @@ std::expected<std::size_t, TransportError> TcpCarrier::receive_batch(
   const auto drain = [&](TcpTransport& conn) {
     if (delivered >= out.size()) return;
     if (!conn.connected()) return;
-    if (!(pop3_ ? conn.pop3_established() : conn.tls_established())) return;
+    if (!(raw_ ? conn.connected() : (pop3_ ? conn.pop3_established() : conn.tls_established()))) return;
     inbox_.resize(out.size() - delivered);
     const auto received = conn.receive_frames(inbox_);
     if (!received) {
