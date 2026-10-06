@@ -123,6 +123,7 @@ struct Config {
   std::string tun_name{"norr0"};
   std::string user;
   std::vector<PeerEntry> peers;
+  std::vector<std::string> notes;
   std::vector<ForwardEntry> forwards;
 };
 

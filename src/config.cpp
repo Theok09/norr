@@ -5,10 +5,12 @@
 #include "norr/endpoint.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <charconv>
 #include <fstream>
 #include <ios>
+#include <optional>
 #include <sstream>
 #include <unordered_set>
 
@@ -117,6 +119,18 @@ using Diagnostic = ConfigDiagnostic;
   }
   return static_cast<std::uint16_t>(*parsed);
 }
+}
+
+[[nodiscard]] std::optional<std::string> deprecated_note(std::string_view qualified) {
+  struct Alias {
+    std::string_view key;
+    std::string_view note;
+  };
+  static constexpr std::array<Alias, 0> kDeprecated{};
+  for (const auto& alias : kDeprecated) {
+    if (qualified == alias.key) return std::string{alias.note};
+  }
+  return std::nullopt;
 }
 
 std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
@@ -469,6 +483,8 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
         return fail(ConfigError::invalid_value);
       }
       config.metrics_listen = std::string{value};
+    } else if (auto note = deprecated_note(qualified)) {
+      config.notes.push_back(std::move(*note));
     } else {
       return fail(ConfigError::unknown_key);
     }

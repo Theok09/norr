@@ -64,6 +64,9 @@ int check(const std::string& path) {
     return 1;
   }
 
+  for (const auto& note : config->notes) {
+    std::fprintf(stderr, "config: %s\n", note.c_str());
+  }
   std::printf("ok  port %u  %s\n", config->listen_port, config->identity_key_file.c_str());
   return 0;
 }
@@ -88,6 +91,10 @@ int run(const std::string& path) {
     if (!problem.detail.empty()) std::fprintf(stderr, " (%s)", problem.detail.c_str());
     std::fputc('\n', stderr);
     return 1;
+  }
+
+  for (const auto& note : config->notes) {
+    std::fprintf(stderr, "config: %s\n", note.c_str());
   }
 
   norr::Log::set_level(norr::parse_log_level(config->log_level));
