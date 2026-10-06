@@ -557,12 +557,17 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
     return std::unexpected(Diagnostic{ConfigError::incompatible_options, 0,
                                       "transport.junk requires transport.obfuscation = full"});
   }
+  const bool tcp_framed_carrier =
+      (config.transport == TransportMode::tcp_tls || config.transport == TransportMode::automatic) &&
+      (config.camouflage == CamouflageMode::pop3 || config.camouflage == CamouflageMode::smtp ||
+       config.camouflage == CamouflageMode::xmpp || config.camouflage == CamouflageMode::ssh ||
+       config.camouflage == CamouflageMode::raw);
   if (config.obfuscation.mode != ObfuscationMode::off &&
-      !carries_datagrams(config.transport)) {
+      !carries_datagrams(config.transport) && !tcp_framed_carrier) {
     return std::unexpected(Diagnostic{
         ConfigError::incompatible_options, 0,
         "transport.obfuscation applies to the datagram transports (udp, icmp, ipip, gre, esp, "
-        "ah, ospf)"});
+        "ah, ospf) or a framed tcp carrier (camouflage = pop3/smtp/xmpp/ssh/raw)"});
   }
 
   if (config.camouflage != CamouflageMode::off &&
