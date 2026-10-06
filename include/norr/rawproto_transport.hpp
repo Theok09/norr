@@ -62,6 +62,7 @@ class RawProtoTransport {
   [[nodiscard]] std::expected<void, TransportError> set_mark(std::uint32_t mark);
 
   void set_tag(std::uint16_t tag) noexcept { tag_ = tag; }
+  void set_spi(std::uint32_t spi) noexcept { spi_ = spi; }
   [[nodiscard]] int descriptor() const noexcept { return socket_.get(); }
 
   [[nodiscard]] std::expected<std::size_t, TransportError> send_batch(
@@ -82,6 +83,7 @@ class RawProtoTransport {
   Role role_{Role::client};
   AddressFamily family_{AddressFamily::ipv4};
   std::uint16_t tag_{kNorrRawTag};
+  std::uint32_t spi_{kEspSpi};
   TransportStats stats_{};
   std::vector<std::byte> scratch_;
 };

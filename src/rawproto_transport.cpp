@@ -113,7 +113,7 @@ bool RawProtoTransport::frame_matches(std::span<const std::byte> body) const noe
       return read_u32(body, 4) == static_cast<std::uint32_t>(tag_);
 
     case RawProto::esp:
-      if (read_u32(body, 0) != kEspSpi) return false;
+      if (read_u32(body, 0) != spi_) return false;
       return read_u16(body, 4) == tag_;
 
     case RawProto::ah:
@@ -150,7 +150,7 @@ std::size_t RawProtoTransport::build_frame(std::span<const std::byte> payload,
       break;
 
     case RawProto::esp:
-      write_u32(out, 0, kEspSpi);
+      write_u32(out, 0, spi_);
       write_u16(out, 4, tag_);
       break;
 

@@ -556,6 +556,12 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
           static_cast<unsigned>(static_cast<std::uint8_t>(digest[1])));
       if (tag == 0) tag = 1;
       rawproto_transport_.set_tag(tag);
+      auto spi = (static_cast<std::uint32_t>(static_cast<std::uint8_t>(digest[4])) << 24U) |
+                 (static_cast<std::uint32_t>(static_cast<std::uint8_t>(digest[5])) << 16U) |
+                 (static_cast<std::uint32_t>(static_cast<std::uint8_t>(digest[6])) << 8U) |
+                 static_cast<std::uint32_t>(static_cast<std::uint8_t>(digest[7]));
+      if (spi == 0) spi = 1;
+      rawproto_transport_.set_spi(spi);
     }
     const auto far = partner->endpoint.has_value() ? *partner->endpoint : *bind_address;
     const auto raw_kind =

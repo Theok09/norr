@@ -109,10 +109,32 @@ hex_ip() { printf '%d.%d.%d.%d' "0x${1:0:2}" "0x${1:2:2}" "0x${1:4:2}" "0x${1:6:
 
 fec_code() { case "$1" in off) echo 0 ;; light) echo 1 ;; moderate) echo 2 ;; aggressive) echo 3 ;; *) echo 4 ;; esac; }
 fec_name() { case "$1" in 0) echo off ;; 1) echo light ;; 2) echo moderate ;; 3) echo aggressive ;; *) echo auto ;; esac; }
-transport_code() { case "$1" in udp) echo 0 ;; tcp) echo 1 ;; camo) echo 2 ;; icmp) echo 3 ;; *) fail "unknown transport $1; use udp, tcp, camo or icmp" ;; esac; }
-transport_name() { case "$1" in 0) echo udp ;; 1) echo tcp ;; 2) echo camo ;; 3) echo icmp ;; *) fail "the join code names an unknown transport" ;; esac; }
+transport_code() {
+  case "$1" in
+    udp) echo 0 ;; tcp) echo 1 ;; camo) echo 2 ;; icmp) echo 3 ;;
+    ah) echo 4 ;; esp) echo 5 ;; gre) echo 6 ;; ipip) echo 7 ;;
+    ospf) echo 8 ;; dns) echo 9 ;; ssh) echo 10 ;;
+    *) fail "unknown transport $1; use udp, tcp, camo, icmp, ah, esp, gre, ipip, ospf, dns or ssh" ;;
+  esac
+}
+transport_name() {
+  case "$1" in
+    0) echo udp ;; 1) echo tcp ;; 2) echo camo ;; 3) echo icmp ;;
+    4) echo ah ;; 5) echo esp ;; 6) echo gre ;; 7) echo ipip ;;
+    8) echo ospf ;; 9) echo dns ;; 10) echo ssh ;;
+    *) fail "the join code names an unknown transport" ;;
+  esac
+}
 
-transport_mtu() { case "$1" in tcp) echo 1380 ;; camo) echo 1320 ;; *) echo 1280 ;; esac; }
+transport_mtu() {
+  case "$1" in
+    tcp | ssh) echo 1380 ;;
+    camo) echo 1320 ;;
+    ah | esp | gre | ipip | ospf) echo 1320 ;;
+    dns) echo 1280 ;;
+    *) echo 1280 ;;
+  esac
+}
 
 transport_block() {
   local kind=$1 sni=$2 connections=$3
@@ -121,6 +143,9 @@ transport_block() {
     tcp) printf '[transport]\nmode = "tcp-tls"\n' ;;
     camo) printf '[transport]\nmode = "tcp-tls"\ncamouflage = "fake-tls"\nconnections = %s\nsni = "%s"\n' "$connections" "$sni" ;;
     icmp) printf '[transport]\nmode = "icmp"\n' ;;
+    ah | esp | gre | ipip | ospf) printf '[transport]\nmode = "%s"\nobfuscation = "full"\n' "$kind" ;;
+    dns) printf '[transport]\nmode = "dns"\ndns_domain = "t.example.com"\nobfuscation = "full"\n' ;;
+    ssh) printf '[transport]\nmode = "tcp-tls"\ncamouflage = "ssh"\nobfuscation = "full"\n' ;;
   esac
 }
 
@@ -128,7 +153,9 @@ default_port() {
   local kind=$1 slot=$2
   case "$kind" in
     icmp) echo 9 ;;
-    tcp | camo) echo $((40400 + slot)) ;;
+    dns) echo 53 ;;
+    tcp | camo | ssh) echo $((40400 + slot)) ;;
+    ah | esp | gre | ipip | ospf) echo $((51820 + slot)) ;;
     *) echo $((51820 + slot)) ;;
   esac
 }
@@ -365,7 +392,7 @@ cmd_client() {
   flags=$((16#${hex:2:2}))
   (( flags & 1 )) && direct=true
   (( flags & 2 )) && real_ip=true
-  [[ ${hex:0:2} == 03 ]] && kind=$(transport_name "$(( (flags >> 2) & 7 ))")
+  [[ ${hex:0:2} == 03 ]] && kind=$(transport_name "$(( (flags >> 2) & 15 ))")
   port=$((16#${hex:4:4}))
   slot=$((16#${hex:8:2}))
   fec=$(fec_name "$((16#${hex:10:2}))")
@@ -915,7 +942,14 @@ menu() {
     printf '\n'
     case "$choice" in
       1)
-        read -r -p "  Transport [udp/tcp/camo/icmp] (udp): " kind
+        printf '  %sTransports:%s\n' "$GRAY" "$R"
+        printf '    %sudp%s  general       %stcp%s  plain TLS     %scamo%s fake-TLS\n' \
+          "$B" "$R" "$B" "$R" "$B" "$R"
+        printf '    %sssh%s  SSH mimic     %sdns%s  DNS/53 (crackdown)   %sicmp%s ping\n' \
+          "$B" "$R" "$B" "$R" "$B" "$R"
+        printf '    %sah%s   proto 51 fast %sesp gre ipip ospf%s  raw-IP carriers\n' \
+          "$B" "$R" "$B" "$R"
+        read -r -p "  Transport (udp): " kind
         read -r -p "  Ports to forward, comma separated (none): " forward
         if [[ -n "$forward" ]]; then
           ( cmd_server --transport "${kind:-udp}" --forward "$forward" ) || true
