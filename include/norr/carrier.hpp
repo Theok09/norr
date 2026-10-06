@@ -261,6 +261,8 @@ class TcpCarrier final : public Carrier {
 
   void set_raw() noexcept { raw_ = true; }
 
+  void set_ssh() noexcept { ssh_ = true; }
+
   void set_sni_pool(std::vector<std::string> pool) {
     if (pool.empty()) return;
     sni_pool_ = std::move(pool);
@@ -286,7 +288,7 @@ class TcpCarrier final : public Carrier {
   [[nodiscard]] bool ready() const noexcept {
     return transport_->connected() &&
            (raw_ ? true
-                 : (pop3_ ? transport_->pop3_established() : transport_->tls_established()));
+                 : (ssh_ ? transport_->ssh_established() : (pop3_ ? transport_->pop3_established() : transport_->tls_established())));
   }
 
   void set_connections(std::size_t count) {
@@ -346,6 +348,7 @@ class TcpCarrier final : public Carrier {
   bool pop3_{};
   GreetProfile greet_profile_{GreetProfile::pop3};
   bool raw_{};
+  bool ssh_{};
   std::string sni_{};
   std::vector<std::string> sni_pool_{};
   std::size_t sni_index_{};

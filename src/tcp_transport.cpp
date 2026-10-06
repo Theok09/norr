@@ -214,6 +214,14 @@ std::expected<bool, TransportError> TcpTransport::poll_pop3() {
   return std::unexpected(TransportError::unsupported_platform);
 }
 
+std::expected<void, TransportError> TcpTransport::enable_ssh(bool) {
+  return std::unexpected(TransportError::unsupported_platform);
+}
+
+std::expected<bool, TransportError> TcpTransport::poll_ssh() {
+  return std::unexpected(TransportError::unsupported_platform);
+}
+
 std::expected<bool, TransportError> TcpTransport::poll_camouflage() {
   return std::unexpected(TransportError::unsupported_platform);
 }
@@ -414,10 +422,17 @@ std::expected<std::size_t, TransportError> TcpTransport::send_frame(
 
   if (!*drained) return std::unexpected(TransportError::would_block);
 
-  record_.resize(kTcpLengthPrefixSize + frame.size());
-  record_[0] = static_cast<std::byte>((frame.size() >> 8U) & 0xFFU);
-  record_[1] = static_cast<std::byte>(frame.size() & 0xFFU);
-  std::copy(frame.begin(), frame.end(), record_.begin() + kTcpLengthPrefixSize);
+  if (ssh_active_) {
+    record_.resize(SshFramer::record_size(frame.size()));
+    const auto framed = ssh_framer_.wrap(frame, record_);
+    if (!framed) return std::unexpected(TransportError::message_too_large);
+    record_.resize(*framed);
+  } else {
+    record_.resize(kTcpLengthPrefixSize + frame.size());
+    record_[0] = static_cast<std::byte>((frame.size() >> 8U) & 0xFFU);
+    record_[1] = static_cast<std::byte>(frame.size() & 0xFFU);
+    std::copy(frame.begin(), frame.end(), record_.begin() + kTcpLengthPrefixSize);
+  }
 
   std::size_t written = 0;
   while (written < record_.size()) {
@@ -596,6 +611,64 @@ std::expected<bool, TransportError> TcpTransport::poll_pop3() {
   return pop3_ready_;
 }
 
+std::expected<void, TransportError> TcpTransport::enable_ssh(bool client) {
+  if (!socket_.valid()) return std::unexpected(TransportError::not_started);
+  if (tls_.has_value() || camo_.has_value() || pop3_active_ || ssh_active_) {
+    return std::unexpected(TransportError::already_started);
+  }
+  ssh_active_ = true;
+  ssh_ready_ = false;
+  ssh_client_ = client;
+  ssh_inbox_.clear();
+  ssh_reassembly_.clear();
+  append_str(outbox_, client ? kSshClientBanner : kSshServerBanner);
+  return {};
+}
+
+std::expected<bool, TransportError> TcpTransport::poll_ssh() {
+  if (!ssh_active_) return true;
+  if (state_ != TcpState::connected) return std::unexpected(TransportError::not_started);
+  if (ssh_ready_) return true;
+
+  if (!outbox_.empty()) {
+    const auto drained = flush_output();
+    if (!drained) return std::unexpected(drained.error());
+    if (!outbox_.empty()) return false;
+  }
+
+  std::byte one{};
+  while (true) {
+    const auto has_line =
+        std::any_of(ssh_inbox_.begin(), ssh_inbox_.end(),
+                    [](std::byte b) { return b == std::byte{'\n'}; });
+    if (has_line) break;
+    if (ssh_inbox_.size() > kSshMaxBannerSize) {
+      state_ = TcpState::failed;
+      return std::unexpected(TransportError::receive_failed);
+    }
+    const auto got = ::recv(socket_.get(), &one, 1, 0);
+    if (got > 0) {
+      ssh_inbox_.push_back(one);
+      continue;
+    }
+    if (got == 0) {
+      state_ = TcpState::failed;
+      return std::unexpected(TransportError::receive_failed);
+    }
+    if (errno == EINTR) continue;
+    if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+    state_ = TcpState::failed;
+    return std::unexpected(TransportError::receive_failed);
+  }
+
+  if (std::any_of(ssh_inbox_.begin(), ssh_inbox_.end(),
+                  [](std::byte b) { return b == std::byte{'\n'}; })) {
+    ssh_ready_ = true;
+    ssh_inbox_.clear();
+  }
+  return ssh_ready_;
+}
+
 std::expected<std::size_t, TransportError> TcpTransport::receive_frames(
     std::span<std::span<const std::byte>> out) {
   if (state_ != TcpState::connected) return std::unexpected(TransportError::not_started);
@@ -650,6 +723,27 @@ std::expected<std::size_t, TransportError> TcpTransport::receive_frames(
   }
 
   const auto fill_ready = [&]() {
+    if (ssh_active_) {
+      std::size_t offset = 0;
+      std::vector<std::byte> payload(kMaximumTcpFrame);
+      while (ready_.size() < out.size()) {
+        std::size_t consumed = 0;
+        const auto unwrapped = ssh_framer_.unwrap(
+            std::span{ssh_reassembly_}.subspan(offset), payload, consumed);
+        if (!unwrapped) {
+          if (unwrapped.error() == SshFramerError::incomplete) break;
+          return false;
+        }
+        ready_.emplace_back(payload.begin(),
+                            payload.begin() + static_cast<std::ptrdiff_t>(*unwrapped));
+        offset += consumed;
+      }
+      if (offset > 0) {
+        ssh_reassembly_.erase(ssh_reassembly_.begin(),
+                              ssh_reassembly_.begin() + static_cast<std::ptrdiff_t>(offset));
+      }
+      return true;
+    }
     while (ready_.size() < out.size()) {
       const auto frame = reassembler_.next();
       if (reassembler_.violated()) return false;
@@ -711,7 +805,11 @@ std::expected<std::size_t, TransportError> TcpTransport::receive_frames(
       }
       if (drained) break;
 
-      if (!reassembler_.push(std::span{read_buffer_}.first(static_cast<std::size_t>(received)))) {
+      if (ssh_active_) {
+        const auto chunk = std::span{read_buffer_}.first(static_cast<std::size_t>(received));
+        ssh_reassembly_.insert(ssh_reassembly_.end(), chunk.begin(), chunk.end());
+      } else if (!reassembler_.push(
+                     std::span{read_buffer_}.first(static_cast<std::size_t>(received)))) {
         state_ = TcpState::failed;
         return std::unexpected(TransportError::receive_failed);
       }

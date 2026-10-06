@@ -307,7 +307,7 @@ std::expected<std::size_t, TransportError> RawProtoCarrier::receive_batch(
 }
 
 bool TcpCarrier::connection_ready(const TcpTransport& conn) const noexcept {
-  return conn.connected() && (raw_ ? true : (pop3_ ? conn.pop3_established() : conn.tls_established()));
+  return conn.connected() && (raw_ ? true : (ssh_ ? conn.ssh_established() : (pop3_ ? conn.pop3_established() : conn.tls_established())));
 }
 
 std::size_t TcpCarrier::ready_count() const noexcept {
@@ -401,6 +401,22 @@ void TcpCarrier::drive(TcpTransport& transport, ConnectionSlot& slot, bool diali
     }
     if (!transport.pop3_established()) {
       static_cast<void>(transport.poll_pop3());
+      return;
+    }
+    if (transport.has_pending_output()) static_cast<void>(transport.flush_output());
+    return;
+  }
+
+  if (ssh_) {
+    if (!slot.started) {
+      if (transport.enable_ssh(dialing)) {
+        slot.started = true;
+      } else {
+        return;
+      }
+    }
+    if (!transport.ssh_established()) {
+      static_cast<void>(transport.poll_ssh());
       return;
     }
     if (transport.has_pending_output()) static_cast<void>(transport.flush_output());
@@ -513,7 +529,7 @@ std::expected<std::size_t, TransportError> TcpCarrier::receive_batch(
   const auto drain = [&](TcpTransport& conn) {
     if (delivered >= out.size()) return;
     if (!conn.connected()) return;
-    if (!(raw_ ? conn.connected() : (pop3_ ? conn.pop3_established() : conn.tls_established()))) return;
+    if (!(raw_ ? conn.connected() : (ssh_ ? conn.ssh_established() : (pop3_ ? conn.pop3_established() : conn.tls_established())))) return;
     inbox_.resize(out.size() - delivered);
     const auto received = conn.receive_frames(inbox_);
     if (!received) {

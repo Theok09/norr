@@ -52,7 +52,7 @@ struct ConfigDiagnostic {
 
 enum class NodeRole { server, client };
 enum class TransportMode { automatic, udp, quic, tcp_tls, icmp, ipip, gre, esp, ah, ospf, dns };
-enum class CamouflageMode { off, fake_tls, pop3, smtp, xmpp, raw };
+enum class CamouflageMode { off, fake_tls, pop3, smtp, xmpp, ssh, raw };
 
 inline constexpr std::uint16_t kMinimumMtu = 1280;
 inline constexpr std::uint16_t kMaximumMtu = 9000;

@@ -53,6 +53,7 @@ add_library(norr_core
     src/icmp_transport.cpp
     src/rawproto_transport.cpp
     src/dns_framer.cpp
+    src/ssh_framer.cpp
     src/ip_packet.cpp
     src/key_schedule.cpp
     src/load_monitor.cpp
@@ -288,6 +289,10 @@ if(NORR_BUILD_TESTS)
     add_executable(norr_dns_framer_tests tests/dns_framer_test.cpp)
     target_link_libraries(norr_dns_framer_tests PRIVATE norr_core tests_support)
     add_test(NAME norr_dns_framer_tests COMMAND norr_dns_framer_tests)
+
+    add_executable(norr_ssh_framer_tests tests/ssh_framer_test.cpp)
+    target_link_libraries(norr_ssh_framer_tests PRIVATE norr_core tests_support)
+    add_test(NAME norr_ssh_framer_tests COMMAND norr_ssh_framer_tests)
     add_executable(norr_reality_tests tests/reality_test.cpp)
     target_link_libraries(norr_reality_tests PRIVATE norr_core tests_support)
     add_test(NAME norr_reality_tests COMMAND norr_reality_tests)

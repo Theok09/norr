@@ -13,6 +13,7 @@
 #include "norr/camouflage.hpp"
 #include "norr/endpoint.hpp"
 #include "norr/file_descriptor.hpp"
+#include "norr/ssh_framer.hpp"
 #include "norr/rate_limit.hpp"
 #include "norr/reality.hpp"
 #include "norr/tls.hpp"
@@ -177,6 +178,14 @@ class TcpTransport {
 
   [[nodiscard]] std::expected<bool, TransportError> poll_pop3();
 
+  [[nodiscard]] std::expected<void, TransportError> enable_ssh(bool client);
+
+  [[nodiscard]] bool ssh_enabled() const noexcept { return ssh_active_; }
+
+  [[nodiscard]] bool ssh_established() const noexcept { return ssh_ready_; }
+
+  [[nodiscard]] std::expected<bool, TransportError> poll_ssh();
+
   [[nodiscard]] std::expected<bool, TransportError> poll_connect();
 
   void close() noexcept;
@@ -223,6 +232,12 @@ class TcpTransport {
   std::size_t pop3_step_{};
   std::vector<std::byte> pop3_inbox_;
   GreetProfile pop3_profile_{GreetProfile::pop3};
+  bool ssh_active_{};
+  bool ssh_ready_{};
+  bool ssh_client_{};
+  std::vector<std::byte> ssh_inbox_;
+  SshFramer ssh_framer_{};
+  std::vector<std::byte> ssh_reassembly_;
   enum class RealityMode { off, client, server };
   RealityMode reality_mode_{RealityMode::off};
   PublicKey reality_server_public_{};

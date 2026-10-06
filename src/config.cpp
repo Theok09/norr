@@ -407,6 +407,7 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       else if (value == "pop3") config.camouflage = CamouflageMode::pop3;
       else if (value == "smtp") config.camouflage = CamouflageMode::smtp;
       else if (value == "xmpp") config.camouflage = CamouflageMode::xmpp;
+      else if (value == "ssh") config.camouflage = CamouflageMode::ssh;
       else if (value == "raw") config.camouflage = CamouflageMode::raw;
       else return fail(ConfigError::invalid_value);
     } else if (qualified == "transport.sni") {

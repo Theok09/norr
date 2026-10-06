@@ -347,7 +347,8 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
                            : (config.camouflage == CamouflageMode::xmpp ? GreetProfile::xmpp
                                                                         : GreetProfile::pop3);
     const bool raw = config.camouflage == CamouflageMode::raw;
-    if (!camouflaged && !pop3 && !raw && !tls_available()) {
+    const bool ssh = config.camouflage == CamouflageMode::ssh;
+    if (!camouflaged && !pop3 && !raw && !ssh && !tls_available()) {
       return std::unexpected(Diagnostic{RuntimeError::option_not_implemented,
                                         "transport.mode = tcp-tls needs a TLS backend"});
     }
@@ -369,7 +370,16 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
         (!config.reality_private_key.empty() || !config.reality_public_key.empty())
             ? std::uint8_t{1}
             : config.tcp_connections);
-    if (raw) {
+    if (ssh) {
+      tcp_carrier_->set_ssh();
+      auto ssh_obfuscation = config.obfuscation;
+      if (ssh_obfuscation.mode == ObfuscationMode::off) {
+        ssh_obfuscation.mode = ObfuscationMode::full;
+        ssh_obfuscation.junk_padding = true;
+        if (ssh_obfuscation.junk_max == 0) ssh_obfuscation.junk_max = 96;
+      }
+      tcp_carrier_->configure_obfuscation(ssh_obfuscation, partner->preshared);
+    } else if (raw) {
       tcp_carrier_->set_raw();
       auto raw_obfuscation = config.obfuscation;
       if (raw_obfuscation.mode == ObfuscationMode::off) {
@@ -625,7 +635,8 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
                            : (config.camouflage == CamouflageMode::xmpp ? GreetProfile::xmpp
                                                                         : GreetProfile::pop3);
     const bool raw = config.camouflage == CamouflageMode::raw;
-    if (partner != nullptr && (camouflaged || pop3 || raw || tls_available())) {
+    const bool ssh = config.camouflage == CamouflageMode::ssh;
+    if (partner != nullptr && (camouflaged || pop3 || raw || ssh || tls_available())) {
       if (!dials) {
         if (const auto listening = tcp_listener_.listen(*bind_address); !listening) {
           return std::unexpected(
@@ -639,7 +650,16 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
         (!config.reality_private_key.empty() || !config.reality_public_key.empty())
             ? std::uint8_t{1}
             : config.tcp_connections);
-      if (raw) {
+      if (ssh) {
+        tcp_carrier_->set_ssh();
+        auto ssh_obfuscation = config.obfuscation;
+        if (ssh_obfuscation.mode == ObfuscationMode::off) {
+          ssh_obfuscation.mode = ObfuscationMode::full;
+          ssh_obfuscation.junk_padding = true;
+          if (ssh_obfuscation.junk_max == 0) ssh_obfuscation.junk_max = 96;
+        }
+        tcp_carrier_->configure_obfuscation(ssh_obfuscation, partner->preshared);
+      } else if (raw) {
         tcp_carrier_->set_raw();
         auto raw_obfuscation = config.obfuscation;
         if (raw_obfuscation.mode == ObfuscationMode::off) {
