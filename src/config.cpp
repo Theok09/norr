@@ -24,6 +24,7 @@ namespace {
     case TransportMode::esp:
     case TransportMode::ah:
     case TransportMode::ospf: return true;
+    case TransportMode::dns: return true;
     case TransportMode::quic:
     case TransportMode::tcp_tls: break;
   }
@@ -307,6 +308,7 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       else if (value == "esp") config.transport = TransportMode::esp;
       else if (value == "ah") config.transport = TransportMode::ah;
       else if (value == "ospf") config.transport = TransportMode::ospf;
+      else if (value == "dns") config.transport = TransportMode::dns;
       else return fail(ConfigError::invalid_value);
     } else if (qualified == "qos.enabled") {
       const auto flag = parse_bool(value);
@@ -378,6 +380,8 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       const auto flag = parse_bool(value);
       if (!flag) return fail(flag.error());
       config.icmp_silence_kernel = *flag;
+    } else if (qualified == "transport.dns_domain") {
+      config.dns_domain = std::string{value};
     } else if (qualified == "transport.spoof") {
       const auto flag = parse_bool(value);
       if (!flag) return fail(flag.error());

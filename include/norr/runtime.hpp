@@ -187,6 +187,7 @@ class Runtime {
   std::unique_ptr<UdpCarrier> udp_carrier_;
   std::unique_ptr<IcmpCarrier> icmp_carrier_;
   std::unique_ptr<RawProtoCarrier> rawproto_carrier_;
+  std::unique_ptr<DnsCarrier> dns_carrier_;
   std::unique_ptr<TcpCarrier> tcp_carrier_;
   std::unique_ptr<QuicCarrier> quic_carrier_;
   PathSelector paths_;

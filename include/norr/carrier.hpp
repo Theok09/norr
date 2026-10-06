@@ -11,6 +11,7 @@
 #include <string_view>
 #include <vector>
 
+#include "norr/dns_framer.hpp"
 #include "norr/endpoint.hpp"
 #include "norr/icmp_transport.hpp"
 #include "norr/rawproto_transport.hpp"
@@ -111,6 +112,44 @@ class UdpCarrier final : public Carrier {
   std::uint16_t spoof_source_port_{};
   bool spoofing_{};
   std::uint64_t spoof_undeliverable_{};
+};
+
+class DnsCarrier final : public Carrier {
+ public:
+  DnsCarrier(UdpTransport& transport, const Endpoint& peer, DnsRole role,
+             std::string domain) noexcept
+      : transport_(&transport), peer_(peer) {
+    framer_.configure(role, std::move(domain));
+  }
+
+  void configure_obfuscation(const ObfuscationConfig& config, const PresharedKey& preshared) {
+    obfuscator_.configure(config, preshared);
+  }
+
+  [[nodiscard]] TransportKind kind() const noexcept override { return TransportKind::dns; }
+
+  [[nodiscard]] std::expected<std::size_t, TransportError> send_batch(
+      std::span<const OutboundDatagram> datagrams) override;
+
+  [[nodiscard]] std::expected<std::size_t, TransportError> receive_batch(
+      ReceiveBuffers& buffers, std::span<InboundDatagram> out) override;
+
+  [[nodiscard]] const TransportStats& stats() const noexcept override { return transport_->stats(); }
+
+  [[nodiscard]] std::size_t max_payload() const noexcept override {
+    const auto base = UdpTransport::kDefaultDatagramSize;
+    const auto overhead = framer_.envelope_size() + obfuscator_.max_overhead();
+    return overhead < base ? base - overhead : 0;
+  }
+
+ private:
+  UdpTransport* transport_;
+  Endpoint peer_{};
+  DnsFramer framer_{};
+  Obfuscator obfuscator_{};
+  std::vector<std::vector<std::byte>> wrap_slots_;
+  std::vector<OutboundDatagram> wrap_batch_;
+  std::vector<std::vector<std::byte>> unwrap_slots_;
 };
 
 class IcmpCarrier final : public Carrier {

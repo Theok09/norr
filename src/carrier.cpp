@@ -122,6 +122,61 @@ std::expected<std::size_t, TransportError> UdpCarrier::receive_batch(
   return kept;
 }
 
+std::expected<std::size_t, TransportError> DnsCarrier::send_batch(
+    std::span<const OutboundDatagram> datagrams) {
+  wrap_slots_.resize(datagrams.size());
+  wrap_batch_.clear();
+  wrap_batch_.reserve(datagrams.size());
+  std::vector<std::byte> obf_scratch;
+  for (std::size_t index = 0; index < datagrams.size(); ++index) {
+    std::span<const std::byte> payload = datagrams[index].payload;
+    if (obfuscator_.enabled()) {
+      obf_scratch.assign(payload.size() + obfuscator_.max_overhead(), std::byte{0});
+      const auto wrapped = obfuscator_.wrap(payload, obf_scratch);
+      if (!wrapped) continue;
+      payload = std::span{obf_scratch}.first(*wrapped);
+    }
+    auto& slot = wrap_slots_[index];
+    slot.assign(framer_.envelope_size() + payload.size(), std::byte{0});
+    const auto framed = framer_.wrap(payload, slot);
+    if (!framed) continue;
+    wrap_batch_.push_back(OutboundDatagram{.destination = peer_,
+                                           .payload = std::span{slot}.first(*framed),
+                                           .flow = datagrams[index].flow});
+  }
+  if (wrap_batch_.empty()) return std::size_t{0};
+  const auto sent = transport_->send_batch(wrap_batch_);
+  if (!sent) return std::unexpected(sent.error());
+  return std::min(*sent, datagrams.size());
+}
+
+std::expected<std::size_t, TransportError> DnsCarrier::receive_batch(
+    ReceiveBuffers& buffers, std::span<InboundDatagram> out) {
+  const auto received = transport_->receive_batch(buffers, out);
+  if (!received) return received;
+
+  unwrap_slots_.resize(out.size());
+  std::vector<std::byte> obf_scratch;
+  std::size_t kept = 0;
+  for (std::size_t index = 0; index < *received; ++index) {
+    auto& slot = unwrap_slots_[kept];
+    slot.assign(out[index].payload.size(), std::byte{0});
+    const auto unframed = framer_.unwrap(out[index].payload, slot);
+    if (!unframed) continue;
+    std::span<const std::byte> payload = std::span{slot}.first(*unframed);
+    if (obfuscator_.enabled()) {
+      obf_scratch.assign(payload.size(), std::byte{0});
+      const auto plain = obfuscator_.unwrap(payload, obf_scratch);
+      if (!plain) continue;
+      slot.assign(obf_scratch.begin(),
+                  obf_scratch.begin() + static_cast<std::ptrdiff_t>(*plain));
+      payload = std::span{slot};
+    }
+    out[kept] = InboundDatagram{.source = out[index].source, .payload = payload};
+    ++kept;
+  }
+  return kept;
+}
 
 std::expected<std::size_t, TransportError> IcmpCarrier::send_batch(
     std::span<const OutboundDatagram> datagrams) {

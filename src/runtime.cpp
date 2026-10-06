@@ -559,6 +559,28 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
     if (config.role == NodeRole::client) rawproto_carrier_->prime();
     carrier_ = rawproto_carrier_.get();
     active_kind_ = raw_kind;
+  } else if (config.transport == TransportMode::dns) {
+    const PeerConfig* partner = nullptr;
+    for (PeerId peer = 1; peer <= peer_count_; ++peer) {
+      const auto* candidate = control_->find_peer(peer);
+      if (candidate == nullptr) continue;
+      partner = candidate;
+      if (candidate->endpoint.has_value()) break;
+    }
+    if (partner == nullptr || peer_count_ != 1) {
+      return std::unexpected(Diagnostic{
+          RuntimeError::control_failed,
+          "transport.mode = dns carries one peer per socket; configure a single peer"});
+    }
+    const auto far = partner->endpoint.has_value() ? *partner->endpoint : *bind_address;
+    const auto dns_role = config.role == NodeRole::client ? DnsRole::client : DnsRole::server;
+    dns_carrier_ =
+        std::make_unique<DnsCarrier>(transport_, far, dns_role, config.dns_domain);
+    if (config.obfuscation.mode != ObfuscationMode::off) {
+      dns_carrier_->configure_obfuscation(config.obfuscation, partner->preshared);
+    }
+    carrier_ = dns_carrier_.get();
+    active_kind_ = TransportKind::dns;
   } else {
     udp_carrier_ = std::make_unique<UdpCarrier>(transport_);
     if (config.obfuscation.mode != ObfuscationMode::off) {
@@ -1264,6 +1286,7 @@ void Runtime::evaluate_transport_paths(Instant now) {
     case TransportKind::esp:
     case TransportKind::ah:
     case TransportKind::ospf: next = rawproto_carrier_.get(); break;
+    case TransportKind::dns: next = dns_carrier_.get(); break;
   }
   if (next == nullptr) return;
 

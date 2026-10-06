@@ -51,7 +51,7 @@ struct ConfigDiagnostic {
 };
 
 enum class NodeRole { server, client };
-enum class TransportMode { automatic, udp, quic, tcp_tls, icmp, ipip, gre, esp, ah, ospf };
+enum class TransportMode { automatic, udp, quic, tcp_tls, icmp, ipip, gre, esp, ah, ospf, dns };
 enum class CamouflageMode { off, fake_tls, pop3, smtp, xmpp, raw };
 
 inline constexpr std::uint16_t kMinimumMtu = 1280;
@@ -111,6 +111,7 @@ struct Config {
   ObfuscationConfig obfuscation{};
   bool icmp_echo_request_only{true};
   bool icmp_silence_kernel{false};
+  std::string dns_domain{"t.example.com"};
   bool spoof_enabled{false};
   std::vector<std::uint32_t> spoof_sources;
   TrafficProfile profile{TrafficProfile::standard};
