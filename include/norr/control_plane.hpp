@@ -125,6 +125,7 @@ class ControlPlane {
   [[nodiscard]] SourceRateLimiter& rate_limiter() noexcept { return rate_limiter_; }
 
   void set_under_load(bool value) noexcept { issuer_.set_under_load(value); }
+  void set_rekey_after(Duration interval) noexcept { rekey_after_ = interval; }
   [[nodiscard]] bool under_load() const noexcept { return issuer_.under_load(); }
 
   void evaluate_load(std::size_t queue_depth, std::size_t queue_capacity, Instant now);
@@ -173,6 +174,7 @@ class ControlPlane {
 
   std::unordered_map<std::uint16_t, Provisional> provisional_;
   std::vector<PeerId> keepalive_due_;
+  Duration rekey_after_{kRekeyAfter};
   std::unordered_map<PeerId, std::uint64_t> greatest_timestamp_;
   std::unordered_map<PeerId, Endpoint> learned_endpoint_;
   SourceRateLimiter rate_limiter_;

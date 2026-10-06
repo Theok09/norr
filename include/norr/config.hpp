@@ -112,6 +112,7 @@ struct Config {
   bool icmp_echo_request_only{true};
   bool icmp_silence_kernel{false};
   std::string dns_domain{"t.example.com"};
+  std::int32_t rekey_interval_seconds{120};
   bool spoof_enabled{false};
   std::vector<std::uint32_t> spoof_sources;
   TrafficProfile profile{TrafficProfile::standard};

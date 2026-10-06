@@ -70,6 +70,18 @@ using Diagnostic = ConfigDiagnostic;
   return parsed;
 }
 
+[[nodiscard]] std::expected<std::int32_t, ConfigError> parse_int32(std::string_view value) noexcept {
+  if (value.empty()) return std::unexpected(ConfigError::invalid_value);
+  std::int32_t parsed{};
+  const auto* const begin = value.data();
+  const auto* const end = begin + value.size();
+  const auto result = std::from_chars(begin, end, parsed);
+  if (result.ec != std::errc{} || result.ptr != end) {
+    return std::unexpected(ConfigError::invalid_value);
+  }
+  return parsed;
+}
+
 [[nodiscard]] std::expected<std::uint16_t, ConfigError> parse_port(std::string_view value) noexcept {
   const auto parsed = parse_uint(value);
   if (!parsed) return std::unexpected(parsed.error());
@@ -382,6 +394,10 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       config.icmp_silence_kernel = *flag;
     } else if (qualified == "transport.dns_domain") {
       config.dns_domain = std::string{value};
+    } else if (qualified == "transport.rekey_interval") {
+      const auto parsed = parse_int32(value);
+      if (!parsed) return fail(parsed.error());
+      config.rekey_interval_seconds = *parsed;
     } else if (qualified == "transport.spoof") {
       const auto flag = parse_bool(value);
       if (!flag) return fail(flag.error());

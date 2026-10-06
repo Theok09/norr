@@ -225,6 +225,11 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
   }
 
   control_ = std::make_unique<ControlPlane>(local_static_, sessions_, timers_);
+  if (config.rekey_interval_seconds <= 0) {
+    control_->set_rekey_after(Duration::zero());
+  } else {
+    control_->set_rekey_after(std::chrono::seconds{config.rekey_interval_seconds});
+  }
 
   for (const auto& text : config.network.addresses) {
     const auto prefix = parse_prefix(text);

@@ -145,7 +145,7 @@ transport_block() {
     icmp) printf '[transport]\nmode = "icmp"\n' ;;
     ah | esp | gre | ipip | ospf) printf '[transport]\nmode = "%s"\nobfuscation = "full"\n' "$kind" ;;
     dns) printf '[transport]\nmode = "dns"\ndns_domain = "t.example.com"\nobfuscation = "full"\n' ;;
-    ssh) printf '[transport]\nmode = "tcp-tls"\ncamouflage = "ssh"\nobfuscation = "full"\n' ;;
+    ssh) printf '[transport]\nmode = "tcp-tls"\ncamouflage = "ssh"\n' ;;
   esac
 }
 

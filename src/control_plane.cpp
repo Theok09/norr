@@ -209,7 +209,9 @@ std::expected<void, ControlError> ControlPlane::install_session(PeerId peer,
   timers_->cancel(TimerKind::handshake_retry, peer);
   timers_->cancel(TimerKind::rekey, peer);
   timers_->cancel(TimerKind::keepalive, peer);
-  static_cast<void>(timers_->schedule(TimerKind::rekey, peer, now + kRekeyAfter));
+  if (rekey_after_ > Duration::zero()) {
+    static_cast<void>(timers_->schedule(TimerKind::rekey, peer, now + rekey_after_));
+  }
   static_cast<void>(timers_->schedule(TimerKind::keepalive, peer, now + kKeepaliveInterval));
   return {};
 }
