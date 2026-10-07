@@ -922,8 +922,14 @@ daemon_version() { "$NORRD" version 2>/dev/null | awk '{print $2}' | head -1; }
 
 banner() {
   local version; version=$(daemon_version)
-  printf '\n  %sNORR%s  %s%s  ·  %s  ·  %s%s\n\n' "$B" "$R" "$GRAY" "${version:-not installed}" \
+  printf '\n'
+  printf '  %s███%s %s╔╗╔ ╔═╗ ╦═╗ ╦═╗%s\n' "$ACCENT" "$R" "$B" "$R"
+  printf '  %s█ █%s %s║║║ ║ ║ ╠╦╝ ╠╦╝%s\n' "$ACCENT" "$R" "$B" "$R"
+  printf '  %s███%s %s╝╚╝ ╚═╝ ╩╚═ ╩╚═%s  %s%s  ·  %s  ·  %s%s\n' \
+    "$ACCENT" "$R" "$B" "$R" "$GRAY" "${version:-not installed}" \
     "$(local_ip || echo '?')" "$(hostname)" "$R"
+  printf '  %sencrypted L3 tunnel  ·  udp tcp ssh dns ah esp gre ipip ospf icmp camo%s\n\n' \
+    "$GRAY" "$R"
 }
 
 menu() {
