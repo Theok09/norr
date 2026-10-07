@@ -289,6 +289,21 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
 
   listen_port_ = config.listen_port;
 
+  if (config.encryption == EncryptionMode::psk) {
+    control_->set_rekey_after(Duration::zero());
+    const bool initiator = config.role == NodeRole::client;
+    for (PeerId peer = 1; peer <= peer_count_; ++peer) {
+      const auto* partner = control_->find_peer(peer);
+      if (partner == nullptr) continue;
+      const auto endpoint = partner->endpoint.has_value() ? *partner->endpoint : Endpoint{};
+      if (const auto ok = control_->establish_psk(peer, initiator, partner->preshared, endpoint);
+          !ok) {
+        return std::unexpected(Diagnostic{RuntimeError::control_failed,
+                                          std::string{control_error_message(ok.error())}});
+      }
+    }
+  }
+
   if (config.transport == TransportMode::quic) {
     const PeerConfig* partner = nullptr;
     for (PeerId peer = 1; peer <= peer_count_; ++peer) {

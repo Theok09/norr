@@ -52,6 +52,8 @@ struct ConfigDiagnostic {
 
 enum class NodeRole { server, client };
 enum class TransportMode { automatic, udp, quic, tcp_tls, icmp, ipip, gre, esp, ah, ospf, dns };
+enum class EncryptionMode { noise, psk };
+
 enum class CamouflageMode { off, fake_tls, pop3, smtp, xmpp, ssh, raw };
 
 inline constexpr std::uint16_t kMinimumMtu = 1280;
@@ -95,6 +97,7 @@ struct Config {
   NetworkConfig network;
   TransportMode transport{TransportMode::automatic};
   std::uint8_t tcp_connections{1};
+  EncryptionMode encryption{EncryptionMode::noise};
   CamouflageMode camouflage{CamouflageMode::off};
   std::string camouflage_sni{"www.microsoft.com"};
   std::vector<std::string> camouflage_sni_pool;

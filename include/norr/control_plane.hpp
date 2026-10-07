@@ -128,6 +128,10 @@ class ControlPlane {
   void set_rekey_after(Duration interval) noexcept { rekey_after_ = interval; }
   [[nodiscard]] bool under_load() const noexcept { return issuer_.under_load(); }
 
+  [[nodiscard]] std::expected<void, ControlError> establish_psk(PeerId peer, bool initiator,
+                                                               const PresharedKey& preshared,
+                                                               const Endpoint& endpoint);
+
   void evaluate_load(std::size_t queue_depth, std::size_t queue_capacity, Instant now);
 
   [[nodiscard]] const LoadMonitor& load() const noexcept { return load_monitor_; }
