@@ -199,3 +199,10 @@ printf '\n    %sNext steps%s\n\n' "$B" "$R"
 printf '      %sMenu%s     norr\n' "$MUTED" "$R"
 printf '      %sServer%s   norr server --transport udp --forward 443\n' "$MUTED" "$R"
 printf '      %sClient%s   norr client <code>\n\n' "$MUTED" "$R"
+
+if [[ -t 0 && -t 1 ]]; then
+  read -r -p "    Open the menu now? [Y/n] " answer
+  case "${answer:-y}" in
+    y | Y | "") exec "$PREFIX/bin/norr" ;;
+  esac
+fi

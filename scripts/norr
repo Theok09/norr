@@ -942,14 +942,25 @@ menu() {
     printf '\n'
     case "$choice" in
       1)
-        printf '  %sTransports:%s\n' "$GRAY" "$R"
-        printf '    %sudp%s  general       %stcp%s  plain TLS     %scamo%s fake-TLS\n' \
-          "$B" "$R" "$B" "$R" "$B" "$R"
-        printf '    %sssh%s  SSH mimic     %sdns%s  DNS/53 (crackdown)   %sicmp%s ping\n' \
-          "$B" "$R" "$B" "$R" "$B" "$R"
-        printf '    %sah%s   proto 51 fast %sesp gre ipip ospf%s  raw-IP carriers\n' \
-          "$B" "$R" "$B" "$R"
-        read -r -p "  Transport (udp): " kind
+        printf '  %sPick a transport:%s\n' "$GRAY" "$R"
+        printf '    %s1)%s udp   general, fast\n'            "$ACCENT" "$R"
+        printf '    %s2)%s ssh   looks like SSH, fast\n'     "$ACCENT" "$R"
+        printf '    %s3)%s dns   DNS/53, beats crackdown\n'  "$ACCENT" "$R"
+        printf '    %s4)%s ah    raw proto 51, fastest raw\n' "$ACCENT" "$R"
+        printf '    %s5)%s camo  fake-TLS\n'                 "$ACCENT" "$R"
+        printf '    %s6)%s icmp  looks like ping\n'          "$ACCENT" "$R"
+        printf '    %s7)%s more  esp / gre / ipip / ospf / tcp\n' "$ACCENT" "$R"
+        read -r -p "  Transport [1] : " t
+        case "${t:-1}" in
+          1 | "") kind=udp ;;
+          2) kind=ssh ;;
+          3) kind=dns ;;
+          4) kind=ah ;;
+          5) kind=camo ;;
+          6) kind=icmp ;;
+          7) read -r -p "  Type one of esp/gre/ipip/ospf/tcp: " kind ;;
+          *) kind=$t ;;
+        esac
         read -r -p "  Ports to forward, comma separated (none): " forward
         if [[ -n "$forward" ]]; then
           ( cmd_server --transport "${kind:-udp}" --forward "$forward" ) || true
