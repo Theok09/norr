@@ -502,7 +502,7 @@ std::expected<std::size_t, TransportError> TcpCarrier::send_batch(
     const std::size_t base = datagram.flow % count;
     for (std::size_t attempt = 0; attempt < count; ++attempt) {
       auto* conn = ready_conns[(base + attempt) % count];
-      const auto result = conn->send_frame(payload);
+      const auto result = conn->send_frame(payload, datagram.urgent);
       if (result) {
         delivered = true;
         break;

@@ -946,7 +946,8 @@ void Runtime::send_control(PeerId peer, std::span<const std::byte> payload,
     if (!sealed) return;
     const OutboundDatagram datagram{.destination = *session->endpoint(),
                                     .payload = std::span{frame}.first(*sealed),
-                                    .flow = static_cast<std::uint32_t>(copy)};
+                                    .flow = static_cast<std::uint32_t>(copy),
+                                    .urgent = true};
     const std::array<OutboundDatagram, 1> batch{datagram};
     static_cast<void>(carrier_->send_batch(batch));
   }

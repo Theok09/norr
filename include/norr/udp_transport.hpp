@@ -73,6 +73,7 @@ struct OutboundDatagram {
   std::span<const std::byte> payload;
   std::uint32_t flow{};
   bool spoofable{false};
+  bool urgent{false};
 };
 
 struct InboundDatagram {

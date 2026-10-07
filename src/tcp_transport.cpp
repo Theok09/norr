@@ -183,7 +183,8 @@ void TcpTransport::close() noexcept {
   state_ = TcpState::closed;
 }
 
-std::expected<std::size_t, TransportError> TcpTransport::send_frame(std::span<const std::byte>) {
+std::expected<std::size_t, TransportError> TcpTransport::send_frame(std::span<const std::byte>,
+                                                                    bool) {
   return std::unexpected(TransportError::unsupported_platform);
 }
 
@@ -395,7 +396,7 @@ std::expected<bool, TransportError> TcpTransport::flush_output() {
 }
 
 std::expected<std::size_t, TransportError> TcpTransport::send_frame(
-    std::span<const std::byte> frame) {
+    std::span<const std::byte> frame, bool urgent) {
   if (state_ != TcpState::connected) return std::unexpected(TransportError::not_started);
   if (frame.size() > kMaximumTcpFrame) {
     return std::unexpected(TransportError::message_too_large);
@@ -406,7 +407,7 @@ std::expected<std::size_t, TransportError> TcpTransport::send_frame(
   if (!drained) return std::unexpected(drained.error());
 
   if (camo_.has_value()) {
-    if (!*drained && outbox_.size() >= kTcpOutboxLimit) {
+    if (!*drained && !urgent && outbox_.size() >= kTcpOutboxLimit) {
       return std::unexpected(TransportError::would_block);
     }
     auto wrapped = camo_->wrap(frame);

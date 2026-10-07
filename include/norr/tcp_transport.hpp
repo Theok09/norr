@@ -196,7 +196,7 @@ class TcpTransport {
   void close() noexcept;
 
   [[nodiscard]] std::expected<std::size_t, TransportError> send_frame(
-      std::span<const std::byte> frame);
+      std::span<const std::byte> frame, bool urgent = false);
 
   [[nodiscard]] std::expected<std::size_t, TransportError> receive_frames(
       std::span<std::span<const std::byte>> out);
