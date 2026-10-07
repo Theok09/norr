@@ -375,6 +375,9 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
         (!config.reality_private_key.empty() || !config.reality_public_key.empty())
             ? std::uint8_t{1}
             : config.tcp_connections);
+    if (config.rotate_interval_seconds > 0) {
+      tcp_carrier_->set_rotate_interval(std::chrono::seconds{config.rotate_interval_seconds});
+    }
     if (ssh) {
       tcp_carrier_->set_ssh();
       auto ssh_obfuscation = config.obfuscation;
@@ -661,6 +664,9 @@ std::expected<void, RuntimeDiagnostic> Runtime::start(const Config& config) {
         (!config.reality_private_key.empty() || !config.reality_public_key.empty())
             ? std::uint8_t{1}
             : config.tcp_connections);
+    if (config.rotate_interval_seconds > 0) {
+      tcp_carrier_->set_rotate_interval(std::chrono::seconds{config.rotate_interval_seconds});
+    }
       if (ssh) {
         tcp_carrier_->set_ssh();
         auto ssh_obfuscation = config.obfuscation;

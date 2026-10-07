@@ -454,7 +454,41 @@ void TcpCarrier::poll(Instant now) {
     drive(extra_[index], extra_slots_[index], dialing_, now);
   }
 
+  if (dialing_ && rotate_interval_ > Duration::zero()) rotate_oldest(now);
+
   if (!dialing_) reap();
+}
+
+void TcpCarrier::rotate_oldest(Instant now) {
+  if (last_rotate_ == Instant{}) {
+    last_rotate_ = now;
+    return;
+  }
+  if (now - last_rotate_ < rotate_interval_) return;
+
+  if (ready_count() < 2) return;
+
+  TcpTransport* oldest = nullptr;
+  ConnectionSlot* oldest_slot = nullptr;
+  Instant oldest_since = now;
+  if (connection_ready(*transport_) && primary_slot_.phase_since < oldest_since) {
+    oldest = transport_;
+    oldest_slot = &primary_slot_;
+    oldest_since = primary_slot_.phase_since;
+  }
+  for (std::size_t index = 0; index < extra_.size(); ++index) {
+    if (!connection_ready(extra_[index])) continue;
+    if (extra_slots_[index].phase_since < oldest_since) {
+      oldest = &extra_[index];
+      oldest_slot = &extra_slots_[index];
+      oldest_since = extra_slots_[index].phase_since;
+    }
+  }
+  if (oldest == nullptr) return;
+
+  oldest->close();
+  *oldest_slot = ConnectionSlot{};
+  last_rotate_ = now;
 }
 
 void TcpCarrier::reap() noexcept {

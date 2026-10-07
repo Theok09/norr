@@ -295,6 +295,14 @@ class TcpCarrier final : public Carrier {
     target_ = std::clamp<std::size_t>(count, 1, 8);
     if (target_ > 1) extra_.reserve(target_ - 1);
   }
+
+  void set_rotate_interval(Duration interval) noexcept {
+    rotate_interval_ = interval;
+    if (interval > Duration::zero() && target_ < 2) {
+      target_ = 2;
+      extra_.reserve(1);
+    }
+  }
   [[nodiscard]] std::size_t target_connections() const noexcept { return target_; }
   [[nodiscard]] bool wants_more() const noexcept { return extra_.size() + 1 < target_; }
   void adopt(TcpTransport&& connection) {
@@ -317,6 +325,7 @@ class TcpCarrier final : public Carrier {
   [[nodiscard]] std::size_t ready_count() const noexcept;
 
   void reap() noexcept;
+  void rotate_oldest(Instant now);
 
   template <typename Fn>
   void for_each_descriptor(Fn&& fn) const {
@@ -359,6 +368,8 @@ class TcpCarrier final : public Carrier {
   std::vector<std::span<const std::byte>> inbox_;
   TransportStats stats_{};
   std::size_t target_{1};
+  Duration rotate_interval_{Duration::zero()};
+  Instant last_rotate_{};
   std::vector<TcpTransport> extra_;
   std::vector<ConnectionSlot> extra_slots_;
 

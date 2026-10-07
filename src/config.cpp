@@ -412,6 +412,10 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       const auto parsed = parse_int32(value);
       if (!parsed) return fail(parsed.error());
       config.rekey_interval_seconds = *parsed;
+    } else if (qualified == "transport.rotate_interval") {
+      const auto parsed = parse_int32(value);
+      if (!parsed) return fail(parsed.error());
+      config.rotate_interval_seconds = *parsed;
     } else if (qualified == "transport.spoof") {
       const auto flag = parse_bool(value);
       if (!flag) return fail(flag.error());
