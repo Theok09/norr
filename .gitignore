@@ -16,3 +16,5 @@ core.*
 
 fuzz/
 /.release/
+/docs/COMPARISON_PENGU.md
+/docs/SCORECARD_PENGU.md
