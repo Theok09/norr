@@ -297,22 +297,33 @@ std::expected<std::size_t, TransportError> RawProtoTransport::receive_batch(
   if (out.empty()) return std::size_t{0};
 
   const auto envelope = rawproto_envelope_size(proto_);
-  std::size_t received = 0;
   const auto limit = std::min(out.size(), buffers.count());
+  if (limit == 0) return std::size_t{0};
 
-  while (received < limit) {
-    auto slot = buffers.slot(received);
-    sockaddr_in from{};
-    socklen_t from_len = sizeof(from);
-    const auto got = ::recvfrom(socket_.get(), slot.data(), slot.size(), 0,
-                                reinterpret_cast<sockaddr*>(&from), &from_len);
-    if (got < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-      if (errno == EINTR) continue;
-      ++stats_.rx_errors;
-      break;
-    }
-    const auto datagram = slot.first(static_cast<std::size_t>(got));
+  std::vector<iovec> iov(limit);
+  std::vector<sockaddr_in> addrs(limit);
+  std::vector<mmsghdr> msgs(limit);
+  for (std::size_t index = 0; index < limit; ++index) {
+    auto slot = buffers.slot(index);
+    iov[index] = iovec{.iov_base = slot.data(), .iov_len = slot.size()};
+    msgs[index] = mmsghdr{};
+    msgs[index].msg_hdr.msg_name = &addrs[index];
+    msgs[index].msg_hdr.msg_namelen = sizeof(sockaddr_in);
+    msgs[index].msg_hdr.msg_iov = &iov[index];
+    msgs[index].msg_hdr.msg_iovlen = 1;
+  }
+
+  const auto got = ::recvmmsg(socket_.get(), msgs.data(), static_cast<unsigned>(limit), 0, nullptr);
+  if (got < 0) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) return std::size_t{0};
+    ++stats_.rx_errors;
+    return std::unexpected(TransportError::receive_failed);
+  }
+
+  std::size_t received = 0;
+  for (std::size_t index = 0; index < static_cast<std::size_t>(got); ++index) {
+    const auto slot = buffers.slot(index);
+    const auto datagram = slot.first(msgs[index].msg_len);
     if (datagram.empty()) {
       ++stats_.rx_errors;
       continue;
@@ -328,9 +339,8 @@ std::expected<std::size_t, TransportError> RawProtoTransport::receive_batch(
     if (!frame_matches(body)) continue;
 
     const auto payload = body.subspan(envelope);
-
     std::array<std::byte, 4> raw{};
-    std::memcpy(raw.data(), &from.sin_addr.s_addr, 4);
+    std::memcpy(raw.data(), &addrs[index].sin_addr.s_addr, 4);
     const auto source = Address::from_bytes(AddressFamily::ipv4, raw);
 
     out[received] = InboundDatagram{.source = Endpoint{source, 0}, .payload = payload};
