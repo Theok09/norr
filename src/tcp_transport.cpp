@@ -348,6 +348,14 @@ void TcpTransport::close() noexcept {
   tls_.reset();
   camo_.reset();
   camo_ready_ = false;
+  pop3_active_ = false;
+  pop3_ready_ = false;
+  pop3_step_ = 0;
+  pop3_inbox_.clear();
+  ssh_active_ = false;
+  ssh_ready_ = false;
+  ssh_inbox_.clear();
+  ssh_reassembly_.clear();
 }
 
 std::expected<std::size_t, TransportError> TcpTransport::write_some(

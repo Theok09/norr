@@ -229,38 +229,66 @@ std::expected<void, TransportError> RawProtoTransport::set_mark(std::uint32_t ma
 std::expected<std::size_t, TransportError> RawProtoTransport::send_batch(
     std::span<const OutboundDatagram> datagrams) {
   if (!socket_.valid()) return std::unexpected(TransportError::not_started);
+  if (datagrams.empty()) return std::size_t{0};
 
-  std::size_t sent = 0;
+  const auto envelope = rawproto_envelope_size(proto_);
+  const auto count = datagrams.size();
+  if (send_frames_.size() < count) send_frames_.resize(count);
+  std::vector<iovec> send_iov_(count);
+  std::vector<sockaddr_in> send_addrs_(count);
+  std::vector<mmsghdr> send_msgs_(count);
+
+  std::size_t prepared = 0;
+  std::size_t prepared_bytes = 0;
   for (const auto& datagram : datagrams) {
     if (datagram.destination.family() != AddressFamily::ipv4) {
       ++stats_.tx_errors;
       continue;
     }
-    const auto needed = rawproto_envelope_size(proto_) + datagram.payload.size();
-    if (scratch_.size() < needed) scratch_.resize(needed);
-    const auto framed = build_frame(datagram.payload, scratch_);
+    auto& frame = send_frames_[prepared];
+    const auto needed = envelope + datagram.payload.size();
+    if (frame.size() < needed) frame.resize(needed);
+    const auto framed = build_frame(datagram.payload, frame);
     if (framed == 0) {
       ++stats_.tx_errors;
       continue;
     }
-    const auto octets = datagram.destination.address().bytes();
-    sockaddr_in dest{};
+    auto& dest = send_addrs_[prepared];
+    dest = sockaddr_in{};
     dest.sin_family = AF_INET;
+    const auto octets = datagram.destination.address().bytes();
     std::memcpy(&dest.sin_addr.s_addr, octets.data(), 4);
 
-    const auto result = ::sendto(socket_.get(), scratch_.data(), framed, MSG_NOSIGNAL,
-                                 reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
-    if (result < 0) {
-      if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-      ++stats_.tx_errors;
-      return sent > 0 ? std::expected<std::size_t, TransportError>{sent}
-                      : std::unexpected(TransportError::send_failed);
-    }
-    ++sent;
-    ++stats_.tx_packets;
-    stats_.tx_bytes += datagram.payload.size();
+    send_iov_[prepared] = iovec{.iov_base = frame.data(), .iov_len = framed};
+    auto& msg = send_msgs_[prepared];
+    msg = mmsghdr{};
+    msg.msg_hdr.msg_name = &dest;
+    msg.msg_hdr.msg_namelen = sizeof(dest);
+    msg.msg_hdr.msg_iov = &send_iov_[prepared];
+    msg.msg_hdr.msg_iovlen = 1;
+
+    prepared_bytes += datagram.payload.size();
+    ++prepared;
   }
-  return sent;
+  if (prepared == 0) return std::size_t{0};
+
+  std::size_t done = 0;
+  while (done < prepared) {
+    const auto result = ::sendmmsg(socket_.get(), send_msgs_.data() + done,
+                                   static_cast<unsigned>(prepared - done), MSG_NOSIGNAL);
+    if (result < 0) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) break;
+      ++stats_.tx_errors;
+      if (done > 0) break;
+      return std::unexpected(TransportError::send_failed);
+    }
+    if (result == 0) break;
+    done += static_cast<std::size_t>(result);
+  }
+
+  stats_.tx_packets += done;
+  stats_.tx_bytes += prepared_bytes;
+  return done;
 }
 
 std::expected<std::size_t, TransportError> RawProtoTransport::receive_batch(

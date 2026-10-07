@@ -86,5 +86,6 @@ class RawProtoTransport {
   std::uint32_t spi_{kEspSpi};
   TransportStats stats_{};
   std::vector<std::byte> scratch_;
+  std::vector<std::vector<std::byte>> send_frames_;
 };
 }

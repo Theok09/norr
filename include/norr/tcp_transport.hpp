@@ -162,6 +162,11 @@ class TcpTransport {
     tls_.reset();
     camo_.reset();
     camo_ready_ = false;
+    pop3_active_ = false;
+    pop3_ready_ = false;
+    ssh_active_ = false;
+    ssh_ready_ = false;
+    ssh_reassembly_.clear();
     return std::move(socket_);
   }
 
