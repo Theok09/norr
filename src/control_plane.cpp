@@ -189,35 +189,6 @@ std::expected<OutgoingHandshake, ControlError> ControlPlane::start_handshake(Pee
   return std::move(*initiation);
 }
 
-std::expected<void, ControlError> ControlPlane::establish_psk(PeerId peer, bool initiator,
-                                                             const PresharedKey& preshared,
-                                                             const Endpoint& endpoint) {
-  constexpr std::string_view kSalt = "norr-psk-mode-v1";
-  constexpr std::string_view kClientToServer = "norr-psk-c2s";
-  constexpr std::string_view kServerToClient = "norr-psk-s2c";
-
-  const auto prk = hkdf_extract(std::as_bytes(std::span{kSalt}), preshared);
-
-  TrafficKey c2s{};
-  TrafficKey s2c{};
-  if (!hkdf_expand(prk, std::as_bytes(std::span{kClientToServer}), c2s) ||
-      !hkdf_expand(prk, std::as_bytes(std::span{kServerToClient}), s2c)) {
-    return std::unexpected(ControlError::session_install_failed);
-  }
-
-  NoiseResult result{};
-  if (initiator) {
-    result.send = c2s;
-    result.receive = s2c;
-  } else {
-    result.send = s2c;
-    result.receive = c2s;
-  }
-
-  constexpr std::uint16_t kPskKeyId = 1;
-  return install_session(peer, kPskKeyId, kPskKeyId, result, endpoint);
-}
-
 std::expected<void, ControlError> ControlPlane::install_session(PeerId peer,
                                                                 std::uint16_t local_key_id,
                                                                 std::uint16_t remote_key_id,

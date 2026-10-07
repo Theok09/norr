@@ -387,10 +387,6 @@ std::expected<Config, ConfigDiagnostic> parse_config(std::string_view text) {
       const auto flag = parse_bool(value);
       if (!flag) return fail(flag.error());
       config.obfuscation.priming = *flag;
-    } else if (qualified == "transport.encryption" || qualified == "security.encryption") {
-      if (value == "noise") config.encryption = EncryptionMode::noise;
-      else if (value == "psk") config.encryption = EncryptionMode::psk;
-      else return fail(ConfigError::invalid_value);
     } else if (qualified == "node.log_level") {
       if (value != "debug" && value != "info" && value != "warn" && value != "error" &&
           value != "off") {
